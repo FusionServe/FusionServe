@@ -6,6 +6,7 @@ default:
   pg_app_schema: 'app_public'
   echo_sql: False
   max_page_lenght: 1000
+  anonymous_role: 'fras.marco'
 development:
   pg_host: ep-crimson-queen-09889237.eu-central-1.aws.neon.tech
   echo_sql: True
