@@ -1,37 +1,35 @@
-# from __future__ import annotations
+from typing import Any
 
-import uuid
-from datetime import datetime
-from typing import Optional
+from pydantic import BaseModel, Field
 
-from sqlalchemy.dialects.postgresql import UUID
-from sqlmodel import Column, DateTime, FetchedValue, Field
-
-from ._common_model import CommonModel
+from .config import settings
 
 
-class Job(CommonModel, table=True):
-    id: Optional[uuid.UUID] = Field(
-        default=None,
-        sa_column=Column(UUID, primary_key=True, server_default=FetchedValue()),
+class RegistryItem(BaseModel):
+    model: Any = None
+    get_input: Any = None
+    create_input: Any = None
+    pk_input: Any = None
+
+
+# TODO: review validation pattern
+pattern = r"^\(?\s*([a-zA-Z_]+)\s+(eq|ne|gt|ge|lt|le)\s+"
+pattern += r"('[^']*'|\d+(\.\d+)?)\s*(\s+(and|or)\s+"
+pattern += r"\(?\s*([a-zA-Z_]+)\s+(eq|ne|gt|ge|lt|le)\s+"
+pattern += r"('[^']*'|\d+(\.\d+)?)\s*\)?\s*)*$"
+
+
+class AdvancedFilter(BaseModel):
+    filter: str | None = Field(
+        None,
+        alias="_filter",
+        description="advanced **filter** on multiple fields using expressions",
+        examples="(author eq 'Kafka' or name eq 'Mike') and price lt 2.55",
+        pattern=pattern,
     )
-    external_id: Optional[str] = None
-    cluster: Optional[str] = None
-    queue: Optional[str] = None
-    log_timestamp: Optional[datetime] = Field(
-        default=None,
-        sa_column=Column(DateTime(timezone=True)),
-    )
-    started_at: Optional[datetime] = Field(
-        default=None,
-        sa_column=Column(DateTime(timezone=True)),
-    )
-    ended_at: Optional[datetime] = Field(
-        default=None,
-        sa_column=Column(DateTime(timezone=True)),
-    )
-    queued_at: Optional[datetime] = Field(
-        default=None,
-        sa_column=Column(DateTime(timezone=True)),
-    )
-    exit_code: Optional[int] = None
+
+
+class PaginationParams(BaseModel):
+    limit: int = Field(100, alias="_limit", gt=0, le=settings.max_page_lenght)
+    offset: int = Field(0, alias="_offset", ge=0)
+    order_by: str | None = Field(None, alias="_order_by")

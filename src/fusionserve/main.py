@@ -3,17 +3,24 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import BackgroundTasks, FastAPI, Request, UploadFile
+import prometheus_client
+from fastapi import FastAPI
 from fastapi.concurrency import asynccontextmanager
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import PlainTextResponse
-from prometheus_client import REGISTRY, generate_latest
 
+from . import graphql
 from .config import settings
-from .db import add_routes
+from .rest import add_routes
 
 _logger = logging.getLogger("uvicorn.error")
 _logger.setLevel(os.environ.get("LOG_LEVEL", "ERROR"))
+
+swagger_ui_parameters = {
+    "displayRequestDuration": True,
+    "filter": True,
+    "showExtensions": True,
+}
 
 
 @asynccontextmanager
@@ -28,13 +35,17 @@ app = FastAPI(
     title=settings.app_name,
     openapi_url="/api/openapi.json",
     docs_url="/api/docs",
+    swagger_ui_parameters=swagger_ui_parameters,
     redoc_url=None,
     redirect_slashes=False,
     lifespan=lifespan,
 )
+
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+
+app.include_router(graphql.router, prefix="/graphql")
 
 
 @app.get("/metrics")
 async def get_metrics():
-    return PlainTextResponse(generate_latest())
+    return PlainTextResponse(prometheus_client.generate_latest())
