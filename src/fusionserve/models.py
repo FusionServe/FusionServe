@@ -30,6 +30,6 @@ class AdvancedFilter(BaseModel):
 
 
 class PaginationParams(BaseModel):
-    limit: int = Field(100, alias="_limit", gt=0, le=settings.max_page_lenght)
-    offset: int = Field(0, alias="_offset", ge=0)
-    order_by: str | None = Field(None, alias="_order_by")
+    limit: int = Field(100, alias="__limit", gt=0, le=settings.max_page_lenght)
+    offset: int = Field(0, alias="__offset", ge=0)
+    order_by: str | None = Field(None, alias="__order_by")

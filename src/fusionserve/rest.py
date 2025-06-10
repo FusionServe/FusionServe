@@ -1,22 +1,27 @@
+import logging
 from typing import Annotated, List
 
 import inflect as _inflect
 import odata_query
 import odata_query.exceptions
 import odata_query.sqlalchemy
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import Table, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.automap import AutomapBase
 from sqlalchemy.orm import DeclarativeMeta
 
 from .models import AdvancedFilter, PaginationParams
-from .persistence import Base, get_async_session, introspect, models_registry, set_role
+from .persistence import get_async_session, set_role
+from .config import settings
+
+_logger = logging.getLogger(settings.app_name)
 
 inflect = _inflect.engine()
 inflect.classical(names=0)
-tags_metadata = []
+# tags_metadata = []
 
 
 def create_endpoint(table_name: str, endpoint_type: str):
@@ -27,8 +32,8 @@ def create_endpoint(table_name: str, endpoint_type: str):
 
         async def endpoint(  # noqa: F811
             # request: Request,
-            basic_filter: Annotated[get_input, Query(), Depends()],  # type: ignore
-            pagination: Annotated[PaginationParams, Query(), Depends()] = None,
+            condition: Annotated[get_input, Query(), Depends()],  # type: ignore
+            pagination: Annotated[PaginationParams, Query(), Depends(PaginationParams)] = None,
             advanced_filter: Annotated[AdvancedFilter, Query(), Depends()] = None,
             session: AsyncSession = Depends(get_async_session),
         ):
@@ -36,12 +41,12 @@ def create_endpoint(table_name: str, endpoint_type: str):
             statement = (
                 select(orm_class).limit(pagination.limit).offset(pagination.offset)
             )
-            for k in basic_filter.model_fields:
+            for k in condition.model_fields:
                 # skip attributes not in query string
-                if getattr(basic_filter, k):
+                if getattr(condition, k):
                     # add the where condition to select expression
                     statement = statement.where(
-                        getattr(orm_class, k) == getattr(basic_filter, k)
+                        getattr(orm_class, k) == getattr(condition, k)
                     )
             try:
                 if advanced_filter.filter:
@@ -53,6 +58,7 @@ def create_endpoint(table_name: str, endpoint_type: str):
                 odata_query.exceptions.ParsingException,
             ) as e:
                 # TODO: standardize error responses as the best practises
+                _logger.error(f"Invalid filter: {e}")
                 return JSONResponse({"error": str(e)})
             results = (await session.execute(statement)).scalars().all()
             return results
@@ -124,6 +130,7 @@ def create_endpoint(table_name: str, endpoint_type: str):
                 session.add(item)
             except IntegrityError as e:
                 # TODO: standardize error responses as the best practises
+                _logger.error(f"Integrity error: {e}")
                 lines = str(e.orig).splitlines()
                 return JSONResponse(
                     {
@@ -149,6 +156,7 @@ def create_endpoint(table_name: str, endpoint_type: str):
             except IntegrityError as e:
                 # TODO: deal with fk constraints
                 # TODO: standardize error responses as the best practises
+                _logger.error(f"Integrity error: {e}")
                 lines = str(e.orig).splitlines()
                 return JSONResponse(
                     {
@@ -162,18 +170,19 @@ def create_endpoint(table_name: str, endpoint_type: str):
     return endpoint
 
 
-def add_routes(app: FastAPI):
-    global Base
-    Base = introspect()
+def build(_base: AutomapBase, _registry):
+    global Base, models_registry
+    Base = _base
+    models_registry = _registry
+    router = APIRouter()
     # generate fancy tags descriptions from table comments
-    app.openapi_tags = tags_metadata
+    router.openapi_tags = []
     for key, item in models_registry.items():
         table: Table = Base.classes.get(key).__table__
-        tags_metadata.append({"name": table.name, "description": table.comment})
+        router.openapi_tags.append({"name": table.name, "description": table.comment})
         pks = table.primary_key.columns.keys()
-        "/".join([f"{{{pk}}}" for pk in pks])
         # list
-        app.add_api_route(
+        router.add_api_route(
             f"/api/{key.lower()}",
             create_endpoint(key, "list"),
             response_model=List[item.model],
@@ -185,7 +194,7 @@ def add_routes(app: FastAPI):
         )
         # get one by pk
         # TODO: returning a single object, include related records
-        app.add_api_route(
+        router.add_api_route(
             f"/api/{key.lower()}/{"/".join([f"{{{pk}}}" for pk in pks])}",
             create_endpoint(key, "get_one"),
             response_model=item.model,
@@ -195,7 +204,7 @@ def add_routes(app: FastAPI):
             tags=[key],
         )
         # The POST method is used for creating data
-        app.add_api_route(
+        router.add_api_route(
             f"/api/{key.lower()}",
             create_endpoint(key, "create"),
             response_model=List[item.model],
@@ -207,7 +216,7 @@ def add_routes(app: FastAPI):
         )
         # The PUT replace completely the resource
         # the PATCH method is used for partially updating a resource
-        app.add_api_route(
+        router.add_api_route(
             f"/api/{key.lower()}/{"/".join([f"{{{pk}}}" for pk in pks])}",
             create_endpoint(key, "update"),
             response_model=item.model,
@@ -218,7 +227,7 @@ def add_routes(app: FastAPI):
             tags=[key],
         )
         # The DELETE method is used for removing data.
-        app.add_api_route(
+        router.add_api_route(
             f"/api/{key.lower()}/{"/".join([f"{{{pk}}}" for pk in pks])}",
             create_endpoint(key, "delete"),
             response_model=item.model,
@@ -228,18 +237,19 @@ def add_routes(app: FastAPI):
             methods=["DELETE"],
             tags=[key],
         )
-        # http://api.example.com/v1/store/items/{id}✅
-        # http://api.example.com/v1/store/employees/{id}✅
-        # http://api.example.com/v1/store/employees/{id}/addresses
-        # /device-management/managed-devices/{id}/scripts/{id}/execute	//DON't DO THIS!
-        # /device-management/managed-devices/{id}/scripts/{id}/status		//POST request with action=execute
-        # _ protects keywords in pagination and advanced filtering
-        # /api/books?_offset=0&_limit=10&_orderBy=author desc,title asc
-        # basic FILTER on equality of fields
-        # http://api.example.com/v1/store/items?group=124
-        # http://api.example.com/v1/store/employees?department=IT&region=USA
-        # advanced FILTER on multiple fields using expressions
-        # /api/books?page=0&size=20&$filter=author eq 'Fitzgerald'
-        # /api/books?page=0&size=20&$filter=(author eq 'Fitzgerald' or name eq 'Redmond') and price lt 2.55
-        # /v1.0/people?$filter=name eq 'david'&$orderBy=hireDate
-        # https://docs.oasis-open.org/odata/odata/v4.01/odata-v4.01-part2-url-conventions.html#_Toc31361038
+    return router
+    # http://api.example.com/v1/store/items/{id}✅
+    # http://api.example.com/v1/store/employees/{id}✅
+    # http://api.example.com/v1/store/employees/{id}/addresses
+    # /device-management/managed-devices/{id}/scripts/{id}/execute	//DON't DO THIS!
+    # /device-management/managed-devices/{id}/scripts/{id}/status		//POST request with action=execute
+    # _ protects keywords in pagination and advanced filtering
+    # /api/books?_offset=0&_limit=10&_orderBy=author desc,title asc
+    # basic FILTER on equality of fields
+    # http://api.example.com/v1/store/items?group=124
+    # http://api.example.com/v1/store/employees?department=IT&region=USA
+    # advanced FILTER on multiple fields using expressions
+    # /api/books?page=0&size=20&$filter=author eq 'Fitzgerald'
+    # /api/books?page=0&size=20&$filter=(author eq 'Fitzgerald' or name eq 'Redmond') and price lt 2.55
+    # /v1.0/people?$filter=name eq 'david'&$orderBy=hireDate
+    # https://docs.oasis-open.org/odata/odata/v4.01/odata-v4.01-part2-url-conventions.html#_Toc31361038

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 
 import prometheus_client
 from fastapi import FastAPI
@@ -9,12 +8,12 @@ from fastapi.concurrency import asynccontextmanager
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import PlainTextResponse
 
-from . import graphql
+from . import graphql, rest
 from .config import settings
-from .rest import add_routes
+from .persistence import introspect
 
-_logger = logging.getLogger("uvicorn.error")
-_logger.setLevel(os.environ.get("LOG_LEVEL", "ERROR"))
+_logger = logging.getLogger(settings.app_name)
+
 
 swagger_ui_parameters = {
     "displayRequestDuration": True,
@@ -26,7 +25,9 @@ swagger_ui_parameters = {
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ---- startup ----
-    add_routes(app)
+    Base, models_registry = introspect()
+    app.include_router(rest.build(Base, models_registry))
+    app.include_router(graphql.build(Base, models_registry), include_in_schema=False)
     yield
 
 
@@ -42,8 +43,6 @@ app = FastAPI(
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
-
-app.include_router(graphql.router, prefix="/graphql")
 
 
 @app.get("/metrics")

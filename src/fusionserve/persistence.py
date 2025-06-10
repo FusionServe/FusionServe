@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, Literal, Tuple
 
 import inflect as _inflect
@@ -9,6 +10,8 @@ from sqlalchemy.ext.automap import AutomapBase, automap_base
 
 from .config import settings
 from .models import RegistryItem
+
+_logger = logging.getLogger(settings.app_name)
 
 engine = create_async_engine(
     f"postgresql+asyncpg://{settings.pg_user}:{settings.pg_password}@"
@@ -27,8 +30,6 @@ async def get_async_session():
         yield session
 
 
-models_registry: Dict[str, RegistryItem] = {}
-Base: AutomapBase = None
 inflect = _inflect.engine()
 inflect.classical(names=0)
 
@@ -61,6 +62,7 @@ def introspect():
     )
     metadata = MetaData()
     metadata.reflect(bind=_engine, schema=settings.pg_app_schema)
+    models_registry: Dict[str, RegistryItem] = {}
     Base = automap_base(metadata=metadata)
     # calling prepare() just sets up mapped classes and relationships.
     Base.prepare()
@@ -83,10 +85,11 @@ def introspect():
                 ),
             )
         models_registry[table.name] = item
-    return Base
+    return Base, models_registry
 
 
 async def set_role(session: AsyncSession):
     # TODO: role from jwt or anonymous
     role = settings.anonymous_role
+    _logger.debug(f"Setting role to {role}")
     await session.execute(text(f"SET ROLE '{role}'"))
