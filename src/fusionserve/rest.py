@@ -1,11 +1,11 @@
 import logging
-from typing import Annotated, List
+from typing import Annotated
 
 import inflect as _inflect
 import odata_query
 import odata_query.exceptions
 import odata_query.sqlalchemy
-from fastapi import APIRouter, Depends, FastAPI, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import Table, insert, select
 from sqlalchemy.exc import IntegrityError
@@ -13,9 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.automap import AutomapBase
 from sqlalchemy.orm import DeclarativeMeta
 
+from .config import settings
 from .models import AdvancedFilter, PaginationParams
 from .persistence import get_async_session, set_role
-from .config import settings
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -35,24 +35,18 @@ def create_endpoint(table_name: str, endpoint_type: str):
             condition: Annotated[get_input, Query(), Depends()],  # type: ignore
             pagination: Annotated[PaginationParams, Query(), Depends(PaginationParams)] = None,
             advanced_filter: Annotated[AdvancedFilter, Query(), Depends()] = None,
-            session: AsyncSession = Depends(get_async_session),
+            session: AsyncSession = Depends(get_async_session),  # noqa: B008
         ):
             await set_role(session)
-            statement = (
-                select(orm_class).limit(pagination.limit).offset(pagination.offset)
-            )
+            statement = select(orm_class).limit(pagination.limit).offset(pagination.offset)
             for k in condition.model_fields:
                 # skip attributes not in query string
                 if getattr(condition, k):
                     # add the where condition to select expression
-                    statement = statement.where(
-                        getattr(orm_class, k) == getattr(condition, k)
-                    )
+                    statement = statement.where(getattr(orm_class, k) == getattr(condition, k))
             try:
                 if advanced_filter.filter:
-                    statement = odata_query.sqlalchemy.apply_odata_query(
-                        statement, advanced_filter.filter
-                    )
+                    statement = odata_query.sqlalchemy.apply_odata_query(statement, advanced_filter.filter)
             except (
                 odata_query.exceptions.InvalidFieldException,
                 odata_query.exceptions.ParsingException,
@@ -69,7 +63,7 @@ def create_endpoint(table_name: str, endpoint_type: str):
         async def endpoint(  # noqa: F811
             request: Request,
             pk: Annotated[pk_input, Depends()],  # type: ignore
-            session: AsyncSession = Depends(get_async_session),
+            session: AsyncSession = Depends(get_async_session),  # noqa: B008
         ):
             await set_role(session)
             return await session.get(orm_class, pk.model_dump())
@@ -80,8 +74,8 @@ def create_endpoint(table_name: str, endpoint_type: str):
 
         async def endpoint(  # noqa: F811
             # request: Request,
-            input: List[create_input],  # type: ignore
-            session: AsyncSession = Depends(get_async_session),
+            input: list[create_input],  # type: ignore
+            session: AsyncSession = Depends(get_async_session),  # noqa: B008
         ):
             await set_role(session)
             try:
@@ -118,14 +112,12 @@ def create_endpoint(table_name: str, endpoint_type: str):
             # request: Request,
             pk: Annotated[pk_input, Depends()],  # type: ignore
             input: update_input,  # type: ignore
-            session: AsyncSession = Depends(get_async_session),
+            session: AsyncSession = Depends(get_async_session),  # noqa: B008
         ):
             await set_role(session)
             try:
                 item = await session.get(orm_class, pk.model_dump())
-                for k, v in input.model_dump(
-                    exclude_unset=True, exclude_none=True
-                ).items():
+                for k, v in input.model_dump(exclude_unset=True, exclude_none=True).items():
                     setattr(item, k, v)
                 session.add(item)
             except IntegrityError as e:
@@ -147,7 +139,7 @@ def create_endpoint(table_name: str, endpoint_type: str):
         async def endpoint(  # noqa: F811
             # request: Request,
             pk: Annotated[pk_input, Depends()],  # type: ignore
-            session: AsyncSession = Depends(get_async_session),
+            session: AsyncSession = Depends(get_async_session),  # noqa: B008
         ):
             await set_role(session)
             try:
@@ -185,7 +177,7 @@ def build(_base: AutomapBase, _registry):
         router.add_api_route(
             f"/api/{key.lower()}",
             create_endpoint(key, "list"),
-            response_model=List[item.model],
+            response_model=list[item.model],
             # dependencies=[Annotated[Depends(item.get_input), Query()]],
             summary=f"List all {key}",
             operation_id=f"get_all_{key}",
@@ -195,7 +187,7 @@ def build(_base: AutomapBase, _registry):
         # get one by pk
         # TODO: returning a single object, include related records
         router.add_api_route(
-            f"/api/{key.lower()}/{"/".join([f"{{{pk}}}" for pk in pks])}",
+            f"/api/{key.lower()}/{'/'.join([f'{{{pk}}}' for pk in pks])}",
             create_endpoint(key, "get_one"),
             response_model=item.model,
             summary=f"Get one {inflect.singular_noun(key)} by primary key",
@@ -207,7 +199,7 @@ def build(_base: AutomapBase, _registry):
         router.add_api_route(
             f"/api/{key.lower()}",
             create_endpoint(key, "create"),
-            response_model=List[item.model],
+            response_model=list[item.model],
             # dependencies=[Annotated[Depends(item.get_input), Query()]],
             summary=f"Create some {key}",
             operation_id=f"create_{key}",
@@ -217,7 +209,7 @@ def build(_base: AutomapBase, _registry):
         # The PUT replace completely the resource
         # the PATCH method is used for partially updating a resource
         router.add_api_route(
-            f"/api/{key.lower()}/{"/".join([f"{{{pk}}}" for pk in pks])}",
+            f"/api/{key.lower()}/{'/'.join([f'{{{pk}}}' for pk in pks])}",
             create_endpoint(key, "update"),
             response_model=item.model,
             # dependencies=[Annotated[Depends(item.get_input), Query()]],
@@ -228,7 +220,7 @@ def build(_base: AutomapBase, _registry):
         )
         # The DELETE method is used for removing data.
         router.add_api_route(
-            f"/api/{key.lower()}/{"/".join([f"{{{pk}}}" for pk in pks])}",
+            f"/api/{key.lower()}/{'/'.join([f'{{{pk}}}' for pk in pks])}",
             create_endpoint(key, "delete"),
             response_model=item.model,
             # dependencies=[Annotated[Depends(item.get_input), Query()]],

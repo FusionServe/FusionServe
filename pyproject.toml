@@ -1,9 +1,69 @@
-[build-system]
-# AVOID CHANGING REQUIRES: IT WILL BE UPDATED BY PYSCAFFOLD!
-requires = ["setuptools>=46.1.0", "setuptools_scm[toml]>=5"]
-build-backend = "setuptools.build_meta"
+[project]
+name = "FusionServe"
+version = "0.1"
+description = "Automatic generation of REST and GraphQL APIs by db introspection."
+authors = [
+    { name = "Marco Frassinelli", email = "fras.marco@gmail.com" }
+]
+license = { file = "LICENSE.txt" }
+readme = { file = "README.md", content-type = "text/markdown" }
+platforms = ["any"]
+classifiers = [
+    "Programming Language :: Python",
+]
+requires-python = ">=3.14"
+dependencies = [
+    "asyncpg",
+    "dynaconf",
+    "fastapi",
+    "fastapi_utilities",
+    "icecream>=2.1.10",
+    "importlib-metadata",
+    "inflect",
+    "odata-query",
+    "prometheus_client",
+    "psycopg",
+    "psycopg-binary",
+    "pydantic",
+    "pydantic_core",
+    "python-multipart",
+    "sqlalchemy",
+    "sqlmodel",
+    "strawberry-graphql",
+    "strawberry-sqlalchemy-mapper>=0.8.0",
+    "suds",
+    "typing-extensions",
+    "uvicorn[standard]",
+]
 
-[tool.setuptools_scm]
-# For smarter version schemes and other configuration options,
-# check out https://github.com/pypa/setuptools_scm
-version_scheme = "no-guess-dev"
+[build-system]
+requires = ["uv_build>=0.9.26,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "ruff>=0.15.4",
+]
+
+[project.scripts]
+fusionserve = "fusionserve.main:run"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+]

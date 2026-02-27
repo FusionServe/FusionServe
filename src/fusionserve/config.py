@@ -1,5 +1,3 @@
-import logging.config
-
 from dynaconf import Dynaconf, Validator
 
 settings = Dynaconf(

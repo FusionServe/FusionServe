@@ -1,12 +1,12 @@
 import logging
-from typing import Any, Dict, Literal, Tuple
+from typing import Any, Literal
 
 import inflect as _inflect
 from pydantic import ConfigDict, Field, create_model
 from pydantic.alias_generators import to_pascal
 from sqlalchemy import Column, MetaData, create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.ext.automap import AutomapBase, automap_base
+from sqlalchemy.ext.automap import automap_base
 
 from .config import settings
 from .models import RegistryItem
@@ -23,9 +23,7 @@ engine = create_async_engine(
 
 
 async def get_async_session():
-    async_session = async_sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False
-    )
+    async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with async_session() as session:
         yield session
 
@@ -37,7 +35,7 @@ inflect.classical(names=0)
 def pydantic_field_from_column(
     column: Column,
     model_type: Literal["model", "get_input", "create_input", "pk_input"],
-) -> Tuple[Any, Field]:
+) -> tuple[Any, Field]:
     try:
         python_type = column.type.python_type
     except NotImplementedError:
@@ -62,7 +60,7 @@ def introspect():
     )
     metadata = MetaData()
     metadata.reflect(bind=_engine, schema=settings.pg_app_schema)
-    models_registry: Dict[str, RegistryItem] = {}
+    models_registry: dict[str, RegistryItem] = {}
     Base = automap_base(metadata=metadata)
     # calling prepare() just sets up mapped classes and relationships.
     Base.prepare()
@@ -70,7 +68,7 @@ def introspect():
         if not inflect.singular_noun(table.name):
             raise ValueError(f"Table name {table.name} is not plural")
         item = RegistryItem()
-        for model_type in RegistryItem.model_fields.keys():
+        for model_type in RegistryItem.model_fields:
             setattr(
                 item,
                 model_type,

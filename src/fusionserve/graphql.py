@@ -1,23 +1,18 @@
 import logging
-from typing import Annotated, Any, Dict, Generic, List, Optional, Type, TypeVar
+from typing import TypeVar
 
 import strawberry
-from fastapi import APIRouter, Depends, FastAPI
-from icecream import ic
+from fastapi import Depends
 from sqlalchemy import Table, func, select
 from sqlalchemy.ext.automap import AutomapBase
-from sqlalchemy.orm import Bundle, DeclarativeMeta, load_only
+from sqlalchemy.orm import DeclarativeMeta, load_only
 from strawberry.extensions import QueryDepthLimiter
 from strawberry.fastapi import GraphQLRouter
-from strawberry.schema.config import StrawberryConfig
-from strawberry_sqlalchemy_mapper import (
-    StrawberrySQLAlchemyLoader,
-    StrawberrySQLAlchemyMapper,
-)
+from strawberry_sqlalchemy_mapper import StrawberrySQLAlchemyLoader, StrawberrySQLAlchemyMapper
 
 from .config import settings
-from .models import AdvancedFilter, PaginationParams, RegistryItem
-from .persistence import get_async_session, introspect, set_role
+from .models import PaginationParams, RegistryItem
+from .persistence import get_async_session, set_role
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -25,13 +20,9 @@ Item = TypeVar("Item")
 
 
 @strawberry.type
-class PaginationWindow(Generic[Item]):
-    nodes: List[Item] = strawberry.field(
-        description="The list of items in this pagination window."
-    )
-    total_count: int = strawberry.field(
-        description="Total number of items in the filtered dataset."
-    )
+class PaginationWindow[Item]:
+    nodes: list[Item] = strawberry.field(description="The list of items in this pagination window.")
+    total_count: int = strawberry.field(description="Total number of items in the filtered dataset.")
 
 
 @strawberry.type
@@ -42,7 +33,7 @@ class Book:
 
 def get_books(
     info: strawberry.Info,
-) -> List[Book]:
+) -> list[Book]:
     return [
         Book(
             title="The Great Gatsby",
@@ -61,13 +52,11 @@ def create_resolver(table_name: str, gql_type):
         info: strawberry.Info,
         limit: int = settings.max_page_lenght,
         offset: int = 0,
-        order_by: Optional[str] = None,
+        order_by: str | None = None,
         # advanced_filter: AdvancedFilter = None,
     ) -> PaginationWindow[gql_type]:  # type: ignore
         statement = (
-            select(
-                Base.classes.get(table_name), func.count().over().label("total_count")
-            )
+            select(Base.classes.get(table_name), func.count().over().label("total_count"))
             .options(load_only(*get_selected_fields(info, gql_type)))
             .limit(limit)
             .offset(offset)
@@ -85,7 +74,7 @@ def create_resolver(table_name: str, gql_type):
 
 # context is expected to have an instance of StrawberrySQLAlchemyLoader
 async def get_context(
-    session=Depends(get_async_session),
+    session=Depends(get_async_session),  # noqa: B008
 ):
     return {
         "session": session,
@@ -98,7 +87,7 @@ def custom_resolver(obj, field):
     print(f"Custom resolver called, obj: {obj}, field: {field}")
     try:
         return obj[field]
-    except (KeyError, TypeError):
+    except KeyError, TypeError:
         return getattr(obj, field)
 
 
@@ -111,6 +100,8 @@ def build(_base: AutomapBase, _registry: dict[str, RegistryItem]):
         table: Table = _base.classes.get(key).__table__
         pks = table.primary_key.columns.keys()
         print(table.name)
+        print(pks)
+        print(item)
         strawberry.input(PaginationParams)
         orm_class: DeclarativeMeta = Base.classes.get(table.name)
         gql_type = mapper.type(orm_class)(type(table.name, (object,), {}))
@@ -119,7 +110,7 @@ def build(_base: AutomapBase, _registry: dict[str, RegistryItem]):
             table.name,
             strawberry.field(resolver=create_resolver(table.name, gql_type)),
         )
-    setattr(Query, "books", strawberry.field(resolver=get_books))
+    Query.books = strawberry.field(resolver=get_books)
     # models that are related to models that are in the schema
     # are automatically mapped at this stage
     mapper.finalize()
@@ -136,7 +127,6 @@ def build(_base: AutomapBase, _registry: dict[str, RegistryItem]):
         schema,
         allow_queries_via_get=False,
         keep_alive=True,
-        debug=True,
         prefix="/graphql",
         context_getter=get_context,
     )
@@ -154,7 +144,4 @@ def get_selected_fields(info: strawberry.Info, gql_type):
         A list of sqlalchemy orm attributes suitable to be used in a load_only() statement.
     """
     nodes = [x for x in info.selected_fields[0].selections if x.name == "nodes"]
-    return [
-        getattr(Base.classes.get(gql_type.__name__), x.name)
-        for x in nodes[0].selections
-    ]
+    return [getattr(Base.classes.get(gql_type.__name__), x.name) for x in nodes[0].selections]
