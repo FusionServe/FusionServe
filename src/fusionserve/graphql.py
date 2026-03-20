@@ -50,7 +50,7 @@ def create_resolver(table_name: str, gql_type):
 
     async def resolver(
         info: strawberry.Info,
-        limit: int = settings.max_page_lenght,
+        limit: int = settings.max_page_length,
         offset: int = 0,
         order_by: str | None = None,
         # advanced_filter: AdvancedFilter = None,

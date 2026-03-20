@@ -14,9 +14,10 @@ from .models import RegistryItem
 _logger = logging.getLogger(settings.app_name)
 
 engine = create_async_engine(
-    f"postgresql+asyncpg://{settings.pg_user}:{settings.pg_password}@"
+    # f"postgresql+asyncpg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
+    f"postgresql+asyncpg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
     f"{settings.pg_host}:"
-    f"{'5432'}/{settings.pg_database}",
+    f"{settings.pg_port}/{settings.pg_database}",
     echo=settings.echo_sql,
     pool_pre_ping=True,
 )
@@ -52,7 +53,7 @@ def pydantic_field_from_column(
 def introspect():
     # Introspection is only supported for sync engines
     _engine = create_engine(
-        f"postgresql+psycopg://{settings.pg_user}:{settings.pg_password}@"
+        f"postgresql+psycopg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
         f"{settings.pg_host}:"
         f"{'5432'}/{settings.pg_database}",
         echo=settings.echo_sql,

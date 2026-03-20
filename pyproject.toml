@@ -14,26 +14,27 @@ classifiers = [
 requires-python = ">=3.14"
 dependencies = [
     "asyncpg",
-    "dynaconf",
     "fastapi",
     "fastapi_utilities",
+    "granian[dotenv,pname,reload,rloop,uvloop]>=2.7.2",
     "icecream>=2.1.10",
     "importlib-metadata",
     "inflect",
+    "litestar>=2.21.0",
     "odata-query",
     "prometheus_client",
     "psycopg",
     "psycopg-binary",
     "pydantic",
+    "pydantic-settings>=2.13.1",
     "pydantic_core",
     "python-multipart",
     "sqlalchemy",
-    "sqlmodel",
     "strawberry-graphql",
     "strawberry-sqlalchemy-mapper>=0.8.0",
     "suds",
     "typing-extensions",
-    "uvicorn[standard]",
+    "uvicorn[standard]>=0.41.0",
 ]
 
 [build-system]
@@ -44,6 +45,7 @@ build-backend = "uv_build"
 dev = [
     "pre-commit>=4.5.1",
     "ruff>=0.15.4",
+    "uvicorn[standard]>=0.41.0",
 ]
 
 [project.scripts]

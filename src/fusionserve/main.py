@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
-import prometheus_client
-from fastapi import FastAPI
-from fastapi.concurrency import asynccontextmanager
-from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import PlainTextResponse
+from litestar import Litestar
 
-from . import graphql, rest
+from . import rest
 from .config import settings
 from .persistence import introspect
 
@@ -23,28 +20,25 @@ swagger_ui_parameters = {
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: Litestar):
     # ---- startup ----
     Base, models_registry = introspect()
-    app.include_router(rest.build(Base, models_registry))
-    app.include_router(graphql.build(Base, models_registry), include_in_schema=False)
+    # app.include_router(rest.build(Base, models_registry))
+    # app.include_router(graphql.build(Base, models_registry), include_in_schema=False)
+    for controller in rest.build_controllers(Base, models_registry):
+        app.register(controller)
     yield
 
 
-# uvicorn entry point
-app = FastAPI(
-    title=settings.app_name,
-    openapi_url="/api/openapi.json",
-    docs_url="/api/docs",
-    swagger_ui_parameters=swagger_ui_parameters,
-    redoc_url=None,
-    redirect_slashes=False,
-    lifespan=lifespan,
+app = Litestar(
+    route_handlers=[],
+    # openapi_config={"openapi_url": "/api/openapi.json", "docs_url": "/api/docs"},
+    lifespan=[lifespan],
 )
 
-app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+# app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 
-@app.get("/metrics")
-async def get_metrics():
-    return PlainTextResponse(prometheus_client.generate_latest())
+# @app.get("/metrics")
+# async def get_metrics():
+#    return PlainTextResponse(prometheus_client.generate_latest())

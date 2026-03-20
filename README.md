@@ -21,7 +21,7 @@ FusionServe introspects a PostgreSQL database schema and automatically generates
 pip install fusionserve
 
 # Run with uvicorn
-uvicorn fusionserve.main:app --reload
+uvicorn fusionserve.main:app --reload --port 8001
 ```
 
 Or using Docker:
@@ -54,6 +54,22 @@ All settings can be overridden with environment variables (uppercase):
 export PG_HOST=production-db.example.com
 export PG_PASSWORD=secret
 ```
+
+### Configuration Options
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `app_name` | FusionServe | Application name |
+| `pg_host` | localhost | PostgreSQL host |
+| `pg_port` | 5432 | PostgreSQL port |
+| `pg_user` | postgres | PostgreSQL user |
+| `pg_password` | - | PostgreSQL password |
+| `pg_database` | - | PostgreSQL database name |
+| `pg_app_schema` | public | PostgreSQL schema to introspect |
+| `max_page_lenght` | 1000 | Maximum page size |
+| `anonymous_role` | reader | PostgreSQL role for anonymous access |
+| `echo_sql` | False | Log SQL queries |
+| `log_level` | INFO | Logging level |
 
 ## REST API
 
@@ -128,12 +144,11 @@ src/fusionserve/
 3. **Route Generation** - Dynamically builds REST and GraphQL endpoints
 4. **Request Handling** - Each request executes with the configured PostgreSQL role
 
-## Requirements
+### API Endpoints
 
-- Python 3.8+
-- PostgreSQL 12+
-- See `setup.cfg` for full dependencies
-
-## License
-
-MIT
+| Path | Description |
+|------|-------------|
+| `/api/docs` | Swagger UI for REST API |
+| `/api/openapi.json` | OpenAPI specification |
+| `/graphql` | GraphQL Playground |
+| `/metrics` | Prometheus metrics |
