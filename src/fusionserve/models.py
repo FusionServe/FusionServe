@@ -33,3 +33,8 @@ class PaginationParams(BaseModel):
     limit: int = Field(100, alias="__limit", gt=0, le=settings.max_page_length)
     offset: int = Field(0, alias="__offset", ge=0)
     order_by: str | None = Field(None, alias="__order_by")
+
+
+class SmartComment(BaseModel):
+    metadata: dict[str, Any] | None = None
+    content: str | None = None

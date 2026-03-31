@@ -1,5 +1,5 @@
 import logging
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import strawberry
 from fastapi import Depends
@@ -132,7 +132,7 @@ def build(_base: AutomapBase, _registry: dict[str, RegistryItem]):
     )
 
 
-def get_selected_fields(info: strawberry.Info, gql_type):
+def get_selected_fields(info: strawberry.Info, gql_type: Any) -> list[Any]:
     """
     Extracts the fields requested in the GraphQL query for a specific type.
 

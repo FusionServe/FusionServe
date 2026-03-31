@@ -4,6 +4,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from litestar import Litestar
+from litestar.config.compression import CompressionConfig
+from litestar.openapi import OpenAPIConfig
+from litestar.openapi.plugins import ScalarRenderPlugin, SwaggerRenderPlugin
+from litestar.plugins.prometheus import PrometheusConfig, PrometheusController
 
 from . import rest
 from .config import settings
@@ -23,7 +27,6 @@ swagger_ui_parameters = {
 async def lifespan(app: Litestar):
     # ---- startup ----
     Base, models_registry = introspect()
-    # app.include_router(rest.build(Base, models_registry))
     # app.include_router(graphql.build(Base, models_registry), include_in_schema=False)
     for controller in rest.build_controllers(Base, models_registry):
         app.register(controller)
@@ -31,14 +34,25 @@ async def lifespan(app: Litestar):
 
 
 app = Litestar(
-    route_handlers=[],
-    # openapi_config={"openapi_url": "/api/openapi.json", "docs_url": "/api/docs"},
+    route_handlers=[PrometheusController],
     lifespan=[lifespan],
+    debug=settings.debug,
+    openapi_config=OpenAPIConfig(
+        title=settings.app_name,
+        version="1.0.0",
+        path="/api/docs",
+        root_schema_site="swagger",
+        render_plugins=[
+            SwaggerRenderPlugin(),
+            ScalarRenderPlugin(
+                options={
+                    "theme": "elysiajs",
+                    "defaultOpenFirstTag": False,
+                    "darkMode": True,
+                }
+            ),
+        ],
+    ),
+    compression_config=CompressionConfig(backend="brotli", brotli_gzip_fallback=True),
+    middleware=[PrometheusConfig(group_path=True, labels={"metrics": "get"}).middleware],
 )
-
-# app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
-
-
-# @app.get("/metrics")
-# async def get_metrics():
-#    return PlainTextResponse(prometheus_client.generate_latest())

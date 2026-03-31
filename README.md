@@ -32,18 +32,17 @@ docker run -p 8001:8001 fusionserve
 
 ## Configuration
 
-FusionServe uses [Dynaconf](https://www.dynaconf.com/) for configuration. Create a `settings.yaml` or `.secrets.yaml` file:
+FusionServe uses [Pydantic Settings](https://github.com/pydantic/pydantic-settings) for configuration.
+Loads .env file and envinronment variables
 
-```yaml
-default:
-  app_name: FusionServe
-  pg_host: localhost
-  pg_user: postgres
-  pg_password: secret
-  pg_database: mydb
-  pg_app_schema: public
-  max_page_lenght: 1000
-  anonymous_role: reader
+### .env File
+
+```bash
+ECHO_SQL=True
+ANONYMOUS_ROLE=anonymous
+PG_HOST=production-db.example.com
+PG_PASSWORD=secret
+DEBUG=True
 ```
 
 ### Environment Variables

@@ -1,15 +1,18 @@
 import logging
+import re
 from typing import Any, Literal
 
 import inflect as _inflect
+import yaml
+from icecream import ic
 from pydantic import ConfigDict, Field, create_model
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import Column, MetaData, create_engine, text
+from sqlalchemy import Column, MetaData, Table, create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.automap import automap_base
 
 from .config import settings
-from .models import RegistryItem
+from .models import RegistryItem, SmartComment
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -92,3 +95,40 @@ async def set_role(session: AsyncSession):
     role = settings.anonymous_role
     _logger.debug(f"Setting role to {role}")
     await session.execute(text(f"SET ROLE '{role}'"))
+
+
+# Compiled once at module level; reusing compiled objects avoids per-call overhead.
+_FRONTMATTER_PATTERN = re.compile(r"^---\s*$.*^---\s*$.*", re.MULTILINE | re.DOTALL)
+_FRONTMATTER_BOUNDARY = re.compile(r"^---\s*$", re.MULTILINE)
+
+
+def parse_comments(table: Table) -> SmartComment:
+    """Parse a table comment, extracting optional YAML frontmatter metadata.
+
+    If the comment starts with a YAML frontmatter block delimited by ``---``
+    markers, the metadata is parsed and returned alongside the plain-text
+    content.  Any YAML parse error falls back to returning the whole comment as
+    plain-text content — no exception is raised (per the parsing contract).
+
+    Args:
+        table: SQLAlchemy ``Table`` whose ``comment`` attribute is parsed.
+
+    Returns:
+        A :class:`~fusionserve.models.SmartComment` with optional ``metadata``
+        and ``content`` fields populated.
+    """
+    if not table.comment:
+        return SmartComment()
+
+    if not _FRONTMATTER_PATTERN.fullmatch(table.comment):
+        return SmartComment(content=table.comment)
+
+    _, frontmatter, content = _FRONTMATTER_BOUNDARY.split(table.comment, 2)
+
+    try:
+        metadata = yaml.safe_load(frontmatter)
+        ic(metadata)
+    except yaml.YAMLError:
+        return SmartComment(content=table.comment)
+
+    return SmartComment(metadata=metadata, content=content.lstrip("\n"))

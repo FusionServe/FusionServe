@@ -14,6 +14,7 @@ classifiers = [
 requires-python = ">=3.14"
 dependencies = [
     "asyncpg",
+    "brotli>=1.2.0",
     "fastapi",
     "fastapi_utilities",
     "granian[dotenv,pname,reload,rloop,uvloop]>=2.7.2",
@@ -43,6 +44,10 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "mkdocs-gen-files>=0.6.1",
+    "mkdocs-literate-nav>=0.6.3",
+    "mkdocs-material>=9.7.6",
+    "mkdocstrings-python>=2.0.3",
     "pre-commit>=4.5.1",
     "ruff>=0.15.4",
     "uvicorn[standard]>=0.41.0",

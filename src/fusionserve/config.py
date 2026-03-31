@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     echo_sql: bool = False
     max_page_length: int = 1000
     anonymous_role: str = "fusionserve"
+    debug: bool = False
 
 
 settings = Settings()
