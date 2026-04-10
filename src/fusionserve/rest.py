@@ -17,7 +17,6 @@ import odata_query.sqlalchemy
 from advanced_alchemy.extensions.litestar import filters
 
 # from litestar import Controller, Request, delete, get, patch, post
-from litestar.di import Provide
 from litestar.exceptions import ClientException, NotFoundException
 from litestar.params import Dependency
 from sqlalchemy import Table, select
@@ -28,7 +27,7 @@ from sqlalchemy.orm import DeclarativeMeta
 from .config import settings
 from .di import create_filter_dependencies
 from .models import AdvancedFilter, RegistryItem
-from .persistence import get_async_session, parse_comments, set_role
+from .persistence import parse_comments, set_role
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -92,7 +91,6 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
 
         path = table_name
         dependencies = create_filter_dependencies({"pagination_type": "limit_offset"})
-        dependencies["session"] = Provide(get_async_session)
         tags = [f"{table.name}: {comment.content if comment.content else ''}"]
         get_input = models_registry[table_name].get_input
 

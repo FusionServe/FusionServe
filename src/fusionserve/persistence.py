@@ -4,12 +4,12 @@ from typing import Any, Literal
 
 import inflect as _inflect
 import yaml
-from icecream import ic
 from pydantic import ConfigDict, Field, create_model
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import Column, MetaData, Table, create_engine, text
+from sqlalchemy import Column, MetaData, Select, Table, create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.automap import automap_base
+from sqlalchemy.orm import DeclarativeMeta, load_only
 
 from .config import settings
 from .models import RegistryItem, SmartComment
@@ -17,7 +17,6 @@ from .models import RegistryItem, SmartComment
 _logger = logging.getLogger(settings.app_name)
 
 engine = create_async_engine(
-    # f"postgresql+asyncpg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
     f"postgresql+asyncpg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
     f"{settings.pg_host}:"
     f"{settings.pg_port}/{settings.pg_database}",
@@ -25,9 +24,10 @@ engine = create_async_engine(
     pool_pre_ping=True,
 )
 
+async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
 
 async def get_async_session():
-    async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with async_session() as session:
         yield session
 
@@ -58,7 +58,7 @@ def introspect():
     _engine = create_engine(
         f"postgresql+psycopg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
         f"{settings.pg_host}:"
-        f"{'5432'}/{settings.pg_database}",
+        f"{settings.pg_port}/{settings.pg_database}",
         echo=settings.echo_sql,
         pool_pre_ping=True,
     )
@@ -127,8 +127,16 @@ def parse_comments(table: Table) -> SmartComment:
 
     try:
         metadata = yaml.safe_load(frontmatter)
-        ic(metadata)
     except yaml.YAMLError:
         return SmartComment(content=table.comment)
 
     return SmartComment(metadata=metadata, content=content.lstrip("\n"))
+
+
+def apply_load_only(statement: Select, table: DeclarativeMeta, selected_fields: list[str] | None):
+    if selected_fields:
+        columns = [getattr(table, column) for column in selected_fields]
+
+    else:
+        columns = [getattr(table, column.name) for column in table.__table__.primary_key.columns]
+    return statement.options(load_only(*columns))

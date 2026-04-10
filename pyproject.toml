@@ -21,6 +21,7 @@ dependencies = [
     "icecream>=2.1.10",
     "importlib-metadata",
     "inflect",
+    "jwt>=1.4.0",
     "litestar>=2.21.0",
     "odata-query",
     "prometheus_client",
