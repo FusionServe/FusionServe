@@ -89,7 +89,7 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
         :class:`sqlalchemy.ext.asyncio.AsyncSession`.
         """
 
-        path = table_name
+        path = f"{settings.base_path}/{table_name}"
         dependencies = create_filter_dependencies({"pagination_type": "limit_offset"})
         tags = [f"{table.name}: {comment.content if comment.content else ''}"]
         get_input = models_registry[table_name].get_input

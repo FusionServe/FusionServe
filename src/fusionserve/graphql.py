@@ -133,7 +133,7 @@ def build(_base: AutomapBase, _registry: dict[str, RegistryItem]):
     )
     controller = make_graphql_controller(
         schema,
-        path="/graphql",
+        path=f"{settings.base_path}/graphql",
         context_getter=custom_context_getter,
         allow_queries_via_get=False,
         graphql_ide="graphiql",

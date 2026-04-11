@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     max_page_length: int = 1000
     anonymous_role: str = "fusionserve"
     debug: bool = False
+    base_path: str = "/api"
 
 
 settings = Settings()

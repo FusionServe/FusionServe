@@ -75,7 +75,7 @@ app = Litestar(
     openapi_config=OpenAPIConfig(
         title=settings.app_name,
         version="1.0.0",
-        path="/api/docs",
+        path=f"{settings.base_path}/docs",
         root_schema_site="swagger",
         render_plugins=[
             SwaggerRenderPlugin(),
