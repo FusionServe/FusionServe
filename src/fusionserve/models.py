@@ -1,6 +1,7 @@
 from enum import Enum
 from typing import Any
 
+import strawberry
 from pydantic import BaseModel, Field
 
 from .config import settings
@@ -11,6 +12,22 @@ class ResolverType(Enum):
 
     LIST = "list"
     PK = "pk"
+
+
+@strawberry.enum
+class SortDirection(Enum):
+    """Sort direction options for GraphQL order_by arguments.
+
+    Supports all combinations of ascending/descending with nulls
+    first/last positioning.
+    """
+
+    ASC = "ASC"
+    ASC_NULLS_FIRST = "ASC_NULLS_FIRST"
+    ASC_NULLS_LAST = "ASC_NULLS_LAST"
+    DESC = "DESC"
+    DESC_NULLS_FIRST = "DESC_NULLS_FIRST"
+    DESC_NULLS_LAST = "DESC_NULLS_LAST"
 
 
 class RegistryItem(BaseModel):
