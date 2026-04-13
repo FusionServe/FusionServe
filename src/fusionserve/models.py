@@ -1,3 +1,5 @@
+import datetime
+import uuid
 from enum import Enum
 from typing import Any
 
@@ -28,6 +30,117 @@ class SortDirection(Enum):
     DESC = "DESC"
     DESC_NULLS_FIRST = "DESC_NULLS_FIRST"
     DESC_NULLS_LAST = "DESC_NULLS_LAST"
+
+
+@strawberry.input(description="Comparison operators for String columns.")
+class StringComparisonExp:
+    """String comparison operators including pattern matching."""
+
+    eq: str | None = strawberry.UNSET
+    neq: str | None = strawberry.UNSET
+    gt: str | None = strawberry.UNSET
+    gte: str | None = strawberry.UNSET
+    lt: str | None = strawberry.UNSET
+    lte: str | None = strawberry.UNSET
+    in_list: list[str] | None = strawberry.UNSET
+    not_in_list: list[str] | None = strawberry.UNSET
+    like: str | None = strawberry.UNSET
+    ilike: str | None = strawberry.UNSET
+    is_null: bool | None = strawberry.UNSET
+
+
+@strawberry.input(description="Comparison operators for Int columns.")
+class IntComparisonExp:
+    """Integer comparison operators."""
+
+    eq: int | None = strawberry.UNSET
+    neq: int | None = strawberry.UNSET
+    gt: int | None = strawberry.UNSET
+    gte: int | None = strawberry.UNSET
+    lt: int | None = strawberry.UNSET
+    lte: int | None = strawberry.UNSET
+    in_list: list[int] | None = strawberry.UNSET
+    not_in_list: list[int] | None = strawberry.UNSET
+    is_null: bool | None = strawberry.UNSET
+
+
+@strawberry.input(description="Comparison operators for Float columns.")
+class FloatComparisonExp:
+    """Float comparison operators."""
+
+    eq: float | None = strawberry.UNSET
+    neq: float | None = strawberry.UNSET
+    gt: float | None = strawberry.UNSET
+    gte: float | None = strawberry.UNSET
+    lt: float | None = strawberry.UNSET
+    lte: float | None = strawberry.UNSET
+    in_list: list[float] | None = strawberry.UNSET
+    not_in_list: list[float] | None = strawberry.UNSET
+    is_null: bool | None = strawberry.UNSET
+
+
+@strawberry.input(description="Comparison operators for Boolean columns.")
+class BooleanComparisonExp:
+    """Boolean comparison operators (only eq and is_null)."""
+
+    eq: bool | None = strawberry.UNSET
+    is_null: bool | None = strawberry.UNSET
+
+
+@strawberry.input(description="Comparison operators for DateTime columns.")
+class DateTimeComparisonExp:
+    """DateTime comparison operators."""
+
+    eq: datetime.datetime | None = strawberry.UNSET
+    neq: datetime.datetime | None = strawberry.UNSET
+    gt: datetime.datetime | None = strawberry.UNSET
+    gte: datetime.datetime | None = strawberry.UNSET
+    lt: datetime.datetime | None = strawberry.UNSET
+    lte: datetime.datetime | None = strawberry.UNSET
+    in_list: list[datetime.datetime] | None = strawberry.UNSET
+    not_in_list: list[datetime.datetime] | None = strawberry.UNSET
+    is_null: bool | None = strawberry.UNSET
+
+
+@strawberry.input(description="Comparison operators for Date columns.")
+class DateComparisonExp:
+    """Date comparison operators."""
+
+    eq: datetime.date | None = strawberry.UNSET
+    neq: datetime.date | None = strawberry.UNSET
+    gt: datetime.date | None = strawberry.UNSET
+    gte: datetime.date | None = strawberry.UNSET
+    lt: datetime.date | None = strawberry.UNSET
+    lte: datetime.date | None = strawberry.UNSET
+    in_list: list[datetime.date] | None = strawberry.UNSET
+    not_in_list: list[datetime.date] | None = strawberry.UNSET
+    is_null: bool | None = strawberry.UNSET
+
+
+@strawberry.input(description="Comparison operators for UUID columns.")
+class UUIDComparisonExp:
+    """UUID comparison operators (no ordering operators)."""
+
+    eq: uuid.UUID | None = strawberry.UNSET
+    neq: uuid.UUID | None = strawberry.UNSET
+    gt: uuid.UUID | None = strawberry.UNSET
+    gte: uuid.UUID | None = strawberry.UNSET
+    lt: uuid.UUID | None = strawberry.UNSET
+    lte: uuid.UUID | None = strawberry.UNSET
+    in_list: list[uuid.UUID] | None = strawberry.UNSET
+    not_in_list: list[uuid.UUID] | None = strawberry.UNSET
+    is_null: bool | None = strawberry.UNSET
+
+
+COMPARISON_TYPE_MAP: dict[type, type] = {
+    str: StringComparisonExp,
+    int: IntComparisonExp,
+    float: FloatComparisonExp,
+    bool: BooleanComparisonExp,
+    datetime.datetime: DateTimeComparisonExp,
+    datetime.date: DateComparisonExp,
+    uuid.UUID: UUIDComparisonExp,
+}
 
 
 class RegistryItem(BaseModel):
