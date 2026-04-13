@@ -14,7 +14,7 @@ from litestar.openapi import OpenAPIConfig
 from litestar.openapi.plugins import ScalarRenderPlugin, SwaggerRenderPlugin
 from litestar.plugins.prometheus import PrometheusConfig, PrometheusController
 from litestar.security.jwt import Token
-from pydantic.v1 import BaseModel
+from pydantic import BaseModel
 
 from . import graphql, rest
 from .config import settings

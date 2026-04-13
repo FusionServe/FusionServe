@@ -1,8 +1,16 @@
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from .config import settings
+
+
+class ResolverType(Enum):
+    """Types of GraphQL resolvers that can be generated for a table."""
+
+    LIST = "list"
+    PK = "pk"
 
 
 class RegistryItem(BaseModel):
