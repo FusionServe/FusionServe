@@ -1,5 +1,4 @@
 import pytest
-
 from fusionserve.skeleton import fib, main
 
 __author__ = "Marco Frassinelli"

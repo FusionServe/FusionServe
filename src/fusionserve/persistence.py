@@ -90,9 +90,9 @@ def introspect():
     return Base, models_registry
 
 
-async def set_role(session: AsyncSession):
-    # TODO: role from jwt or anonymous
-    role = settings.anonymous_role
+async def set_role(session: AsyncSession, role: str | None):
+    if not role:
+        role = settings.anonymous_role
     _logger.debug(f"Setting role to {role}")
     await session.execute(text(f"SET ROLE '{role}'"))
 

@@ -15,8 +15,8 @@ import odata_query
 import odata_query.exceptions
 import odata_query.sqlalchemy
 from advanced_alchemy.extensions.litestar import filters
-
-# from litestar import Controller, Request, delete, get, patch, post
+from litestar import Request
+from litestar.datastructures import State
 from litestar.exceptions import ClientException, NotFoundException
 from litestar.params import Dependency
 from sqlalchemy import Table, select
@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.automap import AutomapBase
 from sqlalchemy.orm import DeclarativeMeta
 
+from . import auth
 from .config import settings
 from .di import create_filter_dependencies
 from .models import AdvancedFilter, RegistryItem
@@ -97,10 +98,12 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
         @litestar.get(
             summary=f"List {table_name}",
             description=f"List {table_name}, filtering on any field using advanced filters, pagination and ordering",
+            security=[{"BearerToken": []}],
         )
         async def list_items(
             self,
             session: AsyncSession,
+            request: Request[auth.User, auth.Token, State],
             filters: Annotated[list[filters.FilterTypes], Dependency(skip_validation=True)],
             # order_by: filters.OrderBy ,
             condition: get_input | None = None,  # type: ignore
@@ -129,7 +132,7 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
                 litestar.exceptions.ClientException: If *advanced_filter*
                     contains an invalid OData expression.
             """
-            await set_role(session)
+            await set_role(session, request.user.id if request.user else None)
             statement = filters[0].append_to_statement(select(orm_class), orm_class)
             # statement = select(orm_class)
             if condition:
@@ -156,8 +159,9 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
             raises=[NotFoundException],
             summary=f"Get a {inflect.singular_noun(table_name)}",
             description=f"Get a {inflect.singular_noun(table_name)} by its primary key(s)",
+            security=[{"BearerToken": []}],
         )
-        async def get(
+        async def get_item(
             self,
             session: AsyncSession,
             request: litestar.Request,
@@ -187,8 +191,9 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
         @litestar.post(
             summary=f"Create a new {inflect.singular_noun(table_name)}",
             description=f"Create a new {inflect.singular_noun(table_name)}",
+            security=[{"BearerToken": []}],
         )
-        async def create(self, session: AsyncSession, data: item.model) -> item.model:  # type: ignore
+        async def create_item(self, session: AsyncSession, data: item.model) -> item.model:  # type: ignore
             """Insert a new record into the database.
 
             Args:
@@ -213,8 +218,9 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
             raises=[NotFoundException],
             summary=f"Update a {inflect.singular_noun(table_name)}",
             description=f"Update a {inflect.singular_noun(table_name)} by its primary key(s)",
+            security=[{"BearerToken": []}],
         )
-        async def update(
+        async def update_item(
             self,
             session: AsyncSession,
             request: litestar.Request,
@@ -256,8 +262,9 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
             raises=[NotFoundException],
             summary=f"Delete a {inflect.singular_noun(table_name)}",
             description=f"Delete a {inflect.singular_noun(table_name)} by its primary key(s)",
+            security=[{"BearerToken": []}],
         )
-        async def delete(
+        async def delete_item(
             self,
             session: AsyncSession,
             request: litestar.Request,

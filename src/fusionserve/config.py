@@ -21,5 +21,8 @@ class Settings(BaseSettings):
     debug: bool = False
     base_path: str = "/api"
 
+    jwt_issuer: str | None = None
+    jwks_url: str | None = None
+
 
 settings = Settings()
