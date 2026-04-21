@@ -15,8 +15,6 @@ requires-python = ">=3.14"
 dependencies = [
     "asyncpg",
     "brotli>=1.2.0",
-    "fastapi",
-    "fastapi_utilities",
     "granian[dotenv,pname,reload,rloop,uvloop]>=2.7.2",
     "icecream>=2.1.10",
     "importlib-metadata",
@@ -27,7 +25,7 @@ dependencies = [
     "prometheus_client",
     "psycopg",
     "psycopg-binary",
-    "pydantic",
+    "pydantic[email]",
     "pydantic-settings>=2.13.1",
     "pydantic_core",
     "python-multipart",
@@ -38,6 +36,7 @@ dependencies = [
     "typing-extensions",
     "uvicorn[standard]>=0.41.0",
     "advanced-alchemy>=1.9.3",
+    "python-jsonpath>=2.0.2",
 ]
 
 [build-system]

@@ -31,6 +31,7 @@ from strawberry.types.arguments import StrawberryArgument
 from strawberry.utils.str_converters import to_snake_case
 from strawberry_sqlalchemy_mapper import StrawberrySQLAlchemyMapper
 
+from .auth import User
 from .config import settings
 from .models import COMPARISON_TYPE_MAP, PaginationParams, RegistryItem, ResolverType, SortDirection
 from .persistence import apply_load_only, async_session, set_role
@@ -62,17 +63,6 @@ OPERATOR_MAP: dict[str, object] = {
 
 # Field names reserved for boolean combinators in Where input types.
 COMBINATOR_FIELDS = frozenset({"_and", "_or", "_not"})
-
-
-# TODO: auth
-class User:
-    """Placeholder user class for authentication context.
-
-    This will be replaced with a proper user model once the
-    authentication system is implemented.
-    """
-
-    pass
 
 
 @strawberry.type
@@ -418,7 +408,7 @@ def create_resolver(
         # if the users requests more than one top level field we run concurrently in a thread.
         # the context session is managed at the request level so we need a new one here
         async with async_session() as session:
-            await set_role(session)
+            await set_role(session, info.context.request.user)
             rows = (await session.execute(statement)).all()
         if rows:
             return PaginationWindow[gql_type](
@@ -453,7 +443,7 @@ def create_resolver(
         # if the users requests more than one top level field we run concurrently in a thread.
         # the context session is managed at the request level so we need a new one here
         async with async_session() as session:
-            await set_role(session)
+            await set_role(session, info.context.request.user)
             result = (await session.execute(statement)).scalar_one()
         if result:
             return result

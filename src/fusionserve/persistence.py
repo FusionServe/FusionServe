@@ -6,11 +6,12 @@ import inflect as _inflect
 import yaml
 from pydantic import ConfigDict, Field, create_model
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import Column, MetaData, Select, Table, create_engine, text
+from sqlalchemy import Column, MetaData, Select, Table, create_engine, func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.orm import DeclarativeMeta, load_only
 
+from .auth import User
 from .config import settings
 from .models import RegistryItem, SmartComment
 
@@ -90,11 +91,23 @@ def introspect():
     return Base, models_registry
 
 
-async def set_role(session: AsyncSession, role: str | None):
-    if not role:
+async def set_role(session: AsyncSession, user: User | None):
+    if not user:
         role = settings.anonymous_role
+        statement = Select(func.set_config("role", role, True))
+    role = user.role
+    statement = Select(
+        func.set_config("role", role, True),
+        func.set_config("user.id", str(user.id), True),
+        func.set_config("user.username", user.username, True),
+        func.set_config("user.email", user.email or "", True),
+        func.set_config("user.display_name", user.display_name or user.username, True),
+        func.set_config("user.first_name", user.first_name or "", True),
+        func.set_config("user.surname", user.surname or "", True),
+    )
     _logger.debug(f"Setting role to {role}")
-    await session.execute(text(f"SET ROLE '{role}'"))
+    await session.execute(statement)
+    # select set_config('role', 'app_user', true), set_config('user_id', '2', true), ...
 
 
 # Compiled once at module level; reusing compiled objects avoids per-call overhead.

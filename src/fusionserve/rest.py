@@ -103,7 +103,7 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
         async def list_items(
             self,
             session: AsyncSession,
-            request: Request[auth.User, auth.Token, State],
+            request: Request[auth.User, str, State],
             filters: Annotated[list[filters.FilterTypes], Dependency(skip_validation=True)],
             # order_by: filters.OrderBy ,
             condition: get_input | None = None,  # type: ignore
@@ -132,7 +132,11 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
                 litestar.exceptions.ClientException: If *advanced_filter*
                     contains an invalid OData expression.
             """
-            await set_role(session, request.user.id if request.user else None)
+            # TODO: user.role is set to the default role (first in the list) by auth machinery.
+            # Update with the required role for the table retrieved from the Smart Comments;
+            # raise 403 if the user is not authorized
+            # TODO: what about exc?
+            await set_role(session, request.user)
             statement = filters[0].append_to_statement(select(orm_class), orm_class)
             # statement = select(orm_class)
             if condition:
@@ -180,7 +184,7 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
                 litestar.exceptions.NotFoundException: If no record with the
                     given primary key(s) exists.
             """
-            await set_role(session)
+            await set_role(session, request.user)
             record = await session.get(orm_class, request.path_params)
             if not record:
                 raise NotFoundException(
@@ -193,11 +197,13 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
             description=f"Create a new {inflect.singular_noun(table_name)}",
             security=[{"BearerToken": []}],
         )
-        async def create_item(self, session: AsyncSession, data: item.model) -> item.model:  # type: ignore
+        async def create_item(self, session: AsyncSession, request: litestar.Request, data: item.model) -> item.model:  # type: ignore
             """Insert a new record into the database.
 
             Args:
                 session: The active async SQLAlchemy session injected by DI.
+                request: The current HTTP request; primary key values are read
+                    from ``request.path_params``.
                 data: A validated Pydantic model instance carrying the field
                     values for the new record.  ``None`` values are excluded
                     from the insert statement.
@@ -206,7 +212,7 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
                 The newly created record as a validated Pydantic model instance,
                 refreshed from the database after commit.
             """
-            await set_role(session)
+            await set_role(session, request.user)
             new_item = orm_class(**data.model_dump(exclude_none=True))
             session.add(new_item)
             await session.commit()
@@ -245,7 +251,7 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
                 litestar.exceptions.NotFoundException: If no record with the
                     given primary key(s) exists.
             """
-            await set_role(session)
+            await set_role(session, request.user)
             record = await session.get(orm_class, request.path_params)
             if not record:
                 raise NotFoundException(
@@ -283,7 +289,7 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
                 litestar.exceptions.NotFoundException: If no record with the
                     given primary key(s) exists.
             """
-            await set_role(session)
+            await set_role(session, request.user)
             record = await session.get(orm_class, request.path_params)
             if not record:
                 raise NotFoundException(

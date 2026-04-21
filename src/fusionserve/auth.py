@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
 import httpx
 import jwt
+from jsonpath import JSONPointer
 from jwt import PyJWKClient
 from litestar.exceptions import NotAuthorizedException
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 from .config import settings
 
@@ -23,7 +25,22 @@ jwk_client: PyJWKClient | None = None
 
 
 async def _resolve_jwks_url() -> str:
-    """Return the effective JWKS URL, resolving via OIDC well-known if needed."""
+    """Return the effective JWKS URL, resolving via OIDC well-known if needed.
+
+    If ``settings.jwks_url`` is configured, it takes precedence and is
+    returned directly. Otherwise, the URL is discovered by fetching the
+    OIDC ``.well-known/openid-configuration`` document from
+    ``settings.jwt_issuer`` and extracting the ``jwks_uri`` field.
+
+    Returns:
+        The URL of the JSON Web Key Set (JWKS) endpoint.
+
+    Raises:
+        AssertionError: If neither ``settings.jwks_url`` nor
+            ``settings.jwt_issuer`` is configured.
+        httpx.HTTPStatusError: If the OIDC discovery request fails.
+        KeyError: If the discovery document lacks a ``jwks_uri`` field.
+    """
     # Direct config takes precedence
     if settings.jwks_url:
         return settings.jwks_url
@@ -39,7 +56,15 @@ async def _resolve_jwks_url() -> str:
 
 
 async def _get_jwk_client() -> PyJWKClient:
-    """Return the module-level PyJWKClient, initializing it on first call."""
+    """Return the module-level PyJWKClient, initializing it on first call.
+
+    On first invocation the JWKS URL is resolved and a ``PyJWKClient`` is
+    created with caching enabled (5-minute JWK set TTL and a per-kid LRU
+    of up to 16 keys). Subsequent calls return the same cached client.
+
+    Returns:
+        The shared ``PyJWKClient`` instance used for signing key lookups.
+    """
     global jwk_client  # noqa: PLW0603
     if jwk_client is None:
         jwks_url = await _resolve_jwks_url()
@@ -56,9 +81,23 @@ async def _get_jwk_client() -> PyJWKClient:
 async def verify_and_decode(token: str) -> dict[str, Any]:
     """Verify a JWT using JWKS and return the verified claims.
 
-    Raises ``NotAuthorizedException`` on any authentication failure
-    (malformed token, expired, bad signature, untrusted issuer, network
-    errors fetching JWKS, etc.).
+    The token is decoded once without verification to extract the ``iss``
+    claim, which is validated against ``settings.jwt_issuer`` when
+    configured. The signing key is then fetched from the JWKS endpoint
+    (via the cached ``PyJWKClient``) and used to fully verify the token,
+    including signature, expiration, not-before, and issuer.
+
+    Args:
+        token: The encoded JWT string to verify.
+
+    Returns:
+        The decoded and verified JWT claims as a dictionary.
+
+    Raises:
+        NotAuthorizedException: On any authentication failure, including
+            a malformed token, expired signature, invalid signature,
+            untrusted issuer, missing ``iss`` claim, or network errors
+            while fetching the JWKS.
     """
     try:
         # 1. Decode without verification to extract issuer
@@ -77,6 +116,7 @@ async def verify_and_decode(token: str) -> dict[str, Any]:
         # 4. Get the signing key (synchronous — offload to thread).
         #    PyJWKClient handles kid extraction, caching, and
         #    automatic refresh on kid miss.
+        # TODO: evaluate an async native alternative
         signing_key = await asyncio.to_thread(client.get_signing_key_from_jwt, token)
 
         # 5. Full token verification (signature + exp + nbf + iss)
@@ -85,10 +125,8 @@ async def verify_and_decode(token: str) -> dict[str, Any]:
             key=signing_key,
             algorithms=["RS256"],
             issuer=settings.jwt_issuer if settings.jwt_issuer else issuer,
+            options={"verify_aud": False},
         )
-
-    except NotAuthorizedException:
-        raise
     except jwt.ExpiredSignatureError as exc:
         raise NotAuthorizedException("Token has expired") from exc
     except jwt.InvalidTokenError as exc:
@@ -100,25 +138,64 @@ async def verify_and_decode(token: str) -> dict[str, Any]:
 
 
 class User(BaseModel):
-    id: str
-    name: str
+    """Authenticated user derived from verified JWT claims.
 
+    Attributes:
+        id: Unique identifier for the user.
+        username: Username used to identify the user in the application.
+        email: Optional email address.
+        display_name: Optional human-readable display name.
+        first_name: Optional given name.
+        surname: Optional family name.
+        role: Optional single primary role.
+        roles: Optional list of roles assigned to the user.
+    """
 
-class Token(BaseModel):
-    token: str
+    id: uuid.UUID
+    username: str
+    email: EmailStr | None = None
+    display_name: str | None = None
+    first_name: str | None = None
+    surname: str | None = None
+    role: str | None = None
+    roles: list[str] | None = None
 
 
 async def retrieve_user_handler(token: str) -> User | None:
-    # TODO: complete the logic handling roles
-    """Verify the JWT and return a User from the claims, or None on failure."""
-    try:
-        claims = await verify_and_decode(token)
-    except Exception:
-        return None
+    """Verify the JWT and return a User from the claims, or None on failure.
 
-    sub = claims.get("sub")
+    The token is verified via ``verify_and_decode`` and the resulting
+    claims are mapped to a ``User`` using the JSON pointers configured
+    in ``settings.claims_map``. If the token lacks a ``sub`` claim,
+    ``None`` is returned.
+
+    Args:
+        token: The encoded JWT string to verify and map.
+
+    Returns:
+        A populated ``User`` instance on success, or ``None`` if the
+        token has no ``sub`` claim.
+
+    Raises:
+        NotAuthorizedException: If the token cannot be verified (see
+            ``verify_and_decode``).
+    """
+    payload = await verify_and_decode(token)
+    # TODO: refine logic making claims-to-user mapping configurable
+    sub = payload.get("sub")
     if not sub:
         return None
-
-    name = claims.get("name") or claims.get("preferred_username") or sub
-    return User(id=sub, name=name)
+    # username = payload.get("preferred_username") or payload.get("name") or sub
+    print(settings.client_id)
+    print(settings.claims_map.role)
+    user = User(
+        id=JSONPointer(settings.claims_map.id).resolve(payload),
+        username=JSONPointer(settings.claims_map.username).resolve(payload),
+        email=JSONPointer(settings.claims_map.email).resolve(payload),
+        display_name=JSONPointer(settings.claims_map.display_name).resolve(payload),
+        first_name=JSONPointer(settings.claims_map.first_name).resolve(payload),
+        surname=JSONPointer(settings.claims_map.surname).resolve(payload),
+        role=JSONPointer(settings.claims_map.role).resolve(payload),
+        roles=JSONPointer(settings.claims_map.roles).resolve(payload),
+    )
+    return user
