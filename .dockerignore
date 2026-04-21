@@ -1,0 +1,64 @@
+# VCS
+.git
+.gitignore
+.github
+
+# Virtual environments
+.venv
+.venv*
+.conda*
+.python-version
+
+# Python caches / build artifacts
+__pycache__
+*.py[cod]
+*.so
+*.egg
+*.eggs
+*.egg-info
+build
+dist
+sdist
+.cache
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.tox
+htmlcov
+.coverage
+.coverage.*
+coverage.xml
+junit*.xml
+
+# Editor / OS
+.idea
+.vscode
+.DS_Store
+*.swp
+*~
+
+# Docs
+docs/_build
+docs/api
+docs/_rst
+site
+
+# Secrets / local config — never ship in the image
+.env
+.env.*
+*.pem
+*.key
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Tooling / project-internal
+.claude
+.kilo
+.pre-commit-config.yaml
+.readthedocs.yml
+mkdocs.yaml
+scripts
+tests
+DEVELOPMENT.md
