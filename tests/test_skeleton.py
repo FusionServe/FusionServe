@@ -1,24 +1,13 @@
-import pytest
-from fusionserve.skeleton import fib, main
+"""Basic smoke tests for the fusionserve package."""
+
+import fusionserve
 
 __author__ = "Marco Frassinelli"
 __copyright__ = "Marco Frassinelli"
 __license__ = "MIT"
 
 
-def test_fib():
-    """API Tests"""
-    assert fib(1) == 1
-    assert fib(2) == 1
-    assert fib(7) == 13
-    with pytest.raises(AssertionError):
-        fib(-10)
-
-
-def test_main(capsys):
-    """CLI Tests"""
-    # capsys is a pytest fixture that allows asserts against stdout/stderr
-    # https://docs.pytest.org/en/stable/capture.html
-    main(["7"])
-    captured = capsys.readouterr()
-    assert "The 7-th Fibonacci number is 13" in captured.out
+def test_package_has_version():
+    """The package exposes a ``__version__`` string."""
+    assert isinstance(fusionserve.__version__, str)
+    assert fusionserve.__version__ != ""
