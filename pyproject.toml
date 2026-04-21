@@ -50,6 +50,7 @@ dev = [
     "mkdocs-material>=9.7.6",
     "mkdocstrings-python>=2.0.3",
     "pre-commit>=4.5.1",
+    "pytest>=9.0.3",
     "ruff>=0.15.4",
     "uvicorn[standard]>=0.41.0",
 ]
