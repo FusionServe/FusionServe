@@ -471,8 +471,10 @@ def build(_base: AutomapBase, _registry: dict[str, RegistryItem]):
         A Litestar-compatible GraphQL controller ready to be mounted
         on the application.
     """
+    # TODO: remove global
     global Base, models_registry
     Base = _base
+    # TODO: remove registry dependency
     models_registry = _registry
     mapper = StrawberrySQLAlchemyMapper()
     for key, _item in _registry.items():

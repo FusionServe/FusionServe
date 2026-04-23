@@ -6,7 +6,7 @@ import inflect as _inflect
 import yaml
 from pydantic import ConfigDict, Field, create_model
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import Column, MetaData, Select, Table, create_engine, func
+from sqlalchemy import DDL, Column, MetaData, Select, Table, create_engine, func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.orm import DeclarativeMeta, load_only
@@ -32,6 +32,18 @@ async def get_async_session():
     async with async_session() as session:
         yield session
 
+
+current_user_id_ddl = DDL(
+    f"""
+    CREATE OR REPLACE FUNCTION {settings.pg_app_schema}.current_user_id()
+    RETURNS uuid
+    LANGUAGE sql
+    STABLE
+    AS $function$
+      SELECT current_setting('user.id', true)::uuid;
+    $function$;
+    """
+)
 
 inflect = _inflect.engine()
 inflect.classical(names=0)
@@ -63,6 +75,9 @@ def introspect():
         echo=settings.echo_sql,
         pool_pre_ping=True,
     )
+    with _engine.begin() as connection:
+        _logger.debug("Running DDL to create current_user_id() function")
+        connection.execute(current_user_id_ddl)
     metadata = MetaData()
     metadata.reflect(bind=_engine, schema=settings.pg_app_schema)
     models_registry: dict[str, RegistryItem] = {}
@@ -149,7 +164,6 @@ def parse_comments(table: Table) -> SmartComment:
 def apply_load_only(statement: Select, table: DeclarativeMeta, selected_fields: list[str] | None):
     if selected_fields:
         columns = [getattr(table, column) for column in selected_fields]
-
     else:
         columns = [getattr(table, column.name) for column in table.__table__.primary_key.columns]
     return statement.options(load_only(*columns))

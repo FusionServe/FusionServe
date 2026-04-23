@@ -31,7 +31,6 @@ swagger_ui_parameters = {
 async def lifespan(app: Litestar):
     # ---- startup ----
     Base, models_registry = introspect()
-    # app.include_router(graphql.build(Base, models_registry), include_in_schema=False)
     for controller in rest.build_controllers(Base, models_registry):
         app.register(controller)
     app.register(graphql.build(Base, models_registry))

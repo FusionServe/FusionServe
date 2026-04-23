@@ -188,7 +188,7 @@ def create_service_provider(  # noqa: UP047
 
     Args:
         service_class: The service class inheriting from
-          SQLAlchemyAsyncRepositoryService or SQLAlchemySyncRepositoryService.
+        SQLAlchemyAsyncRepositoryService or SQLAlchemySyncRepositoryService.
         statement: An optional SQLAlchemy Select statement to scope the service.
         config: An optional SQLAlchemy configuration object.
         error_messages: Optional custom error messages for the service.
