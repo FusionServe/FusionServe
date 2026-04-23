@@ -33,7 +33,7 @@ from strawberry_sqlalchemy_mapper import StrawberrySQLAlchemyMapper
 
 from .auth import User
 from .config import settings
-from .models import COMPARISON_TYPE_MAP, PaginationParams, RegistryItem, ResolverType, SortDirection
+from .models import COMPARISON_TYPE_MAP, PaginationParams, ResolverType, SortDirection
 from .persistence import apply_load_only, async_session, set_role
 
 _logger = logging.getLogger(settings.app_name)
@@ -343,7 +343,7 @@ def apply_where(orm_class: DeclarativeMeta, where_input: object, _depth: int = 0
 
 
 def create_resolver(
-    table_name: str,
+    orm_class: DeclarativeMeta,
     gql_type,
     resolver_type: ResolverType,
     order_by_type: type | None = None,
@@ -357,7 +357,7 @@ def create_resolver(
     an independent async session with the configured anonymous role.
 
     Args:
-        table_name: The database table name to resolve against.
+        orm_class: The SQLAlchemy ORM class representing the underlying table.
         gql_type: The Strawberry GraphQL type mapped from the ORM class.
         resolver_type: Whether to create a ``LIST`` or ``PK`` resolver.
         order_by_type: The dynamically generated Strawberry input type for
@@ -369,7 +369,6 @@ def create_resolver(
         An async resolver function suitable for
         ``strawberry.field(resolver=...)``.
     """
-    orm_class: DeclarativeMeta = Base.classes.get(table_name)
 
     async def list_resolver(
         info: strawberry.Info[CustomHTTPContextType, None],
@@ -418,7 +417,6 @@ def create_resolver(
         else:
             return PaginationWindow[gql_type](nodes=[], total_count=0)
 
-    # TODO: make primary keys dinamic instead of assuming it's always "id"
     async def pk_resolver(info: strawberry.Info[CustomHTTPContextType, None], **kwids: object) -> gql_type:  # type: ignore
         """Resolve a single record by its primary key(s).
 
@@ -453,7 +451,7 @@ def create_resolver(
     return {ResolverType.LIST: list_resolver, ResolverType.PK: pk_resolver}[resolver_type]
 
 
-def build(_base: AutomapBase, _registry: dict[str, RegistryItem]):
+def build(_base: AutomapBase):
     """Build a Strawberry GraphQL schema and Litestar controller from reflected tables.
 
     Iterates over the model registry, creates Strawberry types via
@@ -464,24 +462,17 @@ def build(_base: AutomapBase, _registry: dict[str, RegistryItem]):
     Args:
         _base: The SQLAlchemy automap base whose ``.classes`` attribute
             maps table names to ORM classes.
-        _registry: A mapping of table name to :class:`~fusionserve.models.RegistryItem`
-            containing the Pydantic models for each table.
 
     Returns:
         A Litestar-compatible GraphQL controller ready to be mounted
         on the application.
     """
-    # TODO: remove global
-    global Base, models_registry
-    Base = _base
-    # TODO: remove registry dependency
-    models_registry = _registry
     mapper = StrawberrySQLAlchemyMapper()
-    for key, _item in _registry.items():
-        table: Table = _base.classes.get(key).__table__
+    for orm_class in _base.classes:
+        table: Table = orm_class.__table__
         pks = table.primary_key.columns.keys()
         strawberry.input(PaginationParams)
-        orm_class: DeclarativeMeta = Base.classes.get(table.name)
+        orm_class: DeclarativeMeta = _base.classes.get(table.name)
         gql_type = mapper.type(orm_class)(type(table.name, (object,), {}))
         order_by_type = create_order_by_input(table)
         where_type = create_where_input(table)
@@ -490,7 +481,7 @@ def build(_base: AutomapBase, _registry: dict[str, RegistryItem]):
             table.name,
             strawberry.field(
                 resolver=create_resolver(
-                    table.name,
+                    orm_class,
                     gql_type,
                     ResolverType.LIST,
                     order_by_type=order_by_type,
@@ -521,7 +512,7 @@ def build(_base: AutomapBase, _registry: dict[str, RegistryItem]):
             Query,
             inflect.singular_noun(table.name),
             strawberry.field(
-                resolver=create_resolver(table.name, gql_type, ResolverType.PK),
+                resolver=create_resolver(orm_class, gql_type, ResolverType.PK),
                 description=f"Get a {inflect.singular_noun(table.name)} by primary key.",
             ),
         )

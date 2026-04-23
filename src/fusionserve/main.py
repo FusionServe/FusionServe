@@ -33,7 +33,7 @@ async def lifespan(app: Litestar):
     Base, models_registry = introspect()
     for controller in rest.build_controllers(Base, models_registry):
         app.register(controller)
-    app.register(graphql.build(Base, models_registry))
+    app.register(graphql.build(Base))
     yield
 
 
