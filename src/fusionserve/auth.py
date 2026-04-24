@@ -181,13 +181,9 @@ async def retrieve_user_handler(token: str) -> User | None:
             ``verify_and_decode``).
     """
     payload = await verify_and_decode(token)
-    # TODO: refine logic making claims-to-user mapping configurable
     sub = payload.get("sub")
     if not sub:
         return None
-    # username = payload.get("preferred_username") or payload.get("name") or sub
-    print(settings.client_id)
-    print(settings.claims_map.role)
     user = User(
         id=JSONPointer(settings.claims_map.id).resolve(payload),
         username=JSONPointer(settings.claims_map.username).resolve(payload),

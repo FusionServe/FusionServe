@@ -14,6 +14,8 @@ class ResolverType(Enum):
 
     LIST = "list"
     PK = "pk"
+    CREATE = "create"
+    UPDATE = "update"
 
 
 @strawberry.enum

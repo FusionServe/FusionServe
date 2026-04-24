@@ -33,13 +33,15 @@ from strawberry_sqlalchemy_mapper import StrawberrySQLAlchemyMapper
 
 from .auth import User
 from .config import settings
-from .models import COMPARISON_TYPE_MAP, PaginationParams, ResolverType, SortDirection
+from .models import COMPARISON_TYPE_MAP, ResolverType, SortDirection
 from .persistence import apply_load_only, async_session, set_role
 
 _logger = logging.getLogger(settings.app_name)
 
 inflect = _inflect.engine()
 inflect.classical(names=0)
+
+_mapper = StrawberrySQLAlchemyMapper()
 
 Item = TypeVar("Item")
 
@@ -123,6 +125,16 @@ async def custom_context_getter(request: Request, session: AsyncSession) -> Cust
 
 class Query:
     """Root GraphQL query type.
+
+    Fields are dynamically added at startup by :func:`build` for each
+    registered database table.
+    """
+
+    pass
+
+
+class Mutation:
+    """Root GraphQL mutation type.
 
     Fields are dynamically added at startup by :func:`build` for each
     registered database table.
@@ -224,7 +236,71 @@ def create_where_input(table: Table) -> type:
     cls._and = strawberry.UNSET  # type: ignore[attr-defined]
     cls._or = strawberry.UNSET  # type: ignore[attr-defined]
     cls._not = strawberry.UNSET  # type: ignore[attr-defined]
-    print(dir(strawberry.input(cls)))
+    return strawberry.input(cls)
+
+
+def create_input_type(table: Table) -> type:
+    """Dynamically create a Strawberry input type for creating a new record.
+
+    Generates a class named ``{PascalTableName}Input`` with one optional
+    field per column. Unset fields default to ``strawberry.UNSET`` so that
+    omitted columns can be handled with database defaults or nullable
+    constraints.
+
+    Args:
+        table: The SQLAlchemy ``Table`` whose columns drive the input fields.
+        gql_type: The corresponding Strawberry GraphQL type for the table.
+
+    Returns:
+        A Strawberry ``@input``-decorated class.
+    """
+    annotations: dict[str, type] = {}
+    defaults: dict[str, object] = {}
+    for column in table.columns:
+        try:
+            column_type = _mapper._convert_column_to_strawberry_type(column)
+        except NotImplementedError:
+            column_type = str
+        annotations[column.name] = column_type
+        defaults[column.name] = strawberry.UNSET
+        if column.server_default is not None:
+            annotations[column.name] = column_type | None
+
+    class_name = f"{to_pascal(table.name)}Input"
+    cls = type(class_name, (object,), {"__annotations__": annotations, **defaults})
+    return strawberry.input(cls)
+
+
+def patch_input_type(table: Table) -> type:
+    """Dynamically create a Strawberry input type for patching an existing record.
+
+    Generates a class named ``{PascalTableName}Patch`` with one optional
+    field per non-primary-key column. All fields default to
+    ``strawberry.UNSET`` so that omitted columns are left untouched during
+    the update. Primary key columns are excluded because they identify the
+    target record and are passed as separate resolver arguments.
+
+    Args:
+        table: The SQLAlchemy ``Table`` whose columns drive the input fields.
+
+    Returns:
+        A Strawberry ``@input``-decorated class.
+    """
+    pk_names = set(table.primary_key.columns.keys())
+    annotations: dict[str, type] = {}
+    defaults: dict[str, object] = {}
+    for column in table.columns:
+        if column.name in pk_names:
+            continue
+        try:
+            column_type = _mapper._convert_column_to_strawberry_type(column)
+        except NotImplementedError:
+            column_type = str
+        annotations[column.name] = column_type | None
+        defaults[column.name] = strawberry.UNSET
+
+    class_name = f"{to_pascal(table.name)}Patch"
+    cls = type(class_name, (object,), {"__annotations__": annotations, **defaults})
     return strawberry.input(cls)
 
 
@@ -342,7 +418,7 @@ def apply_where(orm_class: DeclarativeMeta, where_input: object, _depth: int = 0
     return and_(*conditions)
 
 
-def create_resolver(
+def resolver_factory(
     orm_class: DeclarativeMeta,
     gql_type,
     resolver_type: ResolverType,
@@ -364,7 +440,6 @@ def create_resolver(
             ordering (only used by ``LIST`` resolvers).
         where_type: The dynamically generated Strawberry input type for
             filtering (only used by ``LIST`` resolvers).
-
     Returns:
         An async resolver function suitable for
         ``strawberry.field(resolver=...)``.
@@ -448,7 +523,70 @@ def create_resolver(
         else:
             raise Exception("not found")
 
-    return {ResolverType.LIST: list_resolver, ResolverType.PK: pk_resolver}[resolver_type]
+    async def create_resolver(
+        info: strawberry.Info[CustomHTTPContextType, None], input: create_input_type(orm_class.__table__)
+    ) -> gql_type:  # type: ignore
+        """Create a new record with the given field values.
+
+        Args:
+            info: The Strawberry resolver info containing the selection set
+                and custom context.
+            **input: Column name/value pairs used to populate the new record.
+
+        Returns:
+            The newly created ORM instance mapped to the GraphQL type.
+        """
+        async with async_session() as session:
+            await set_role(session, info.context.request.user)
+            instance = orm_class(**{k: v for k, v in vars(input).items() if v is not strawberry.UNSET})
+            session.add(instance)
+            await session.commit()
+            await session.refresh(instance)
+        return instance
+
+    async def update_resolver(
+        info: strawberry.Info[CustomHTTPContextType, None],
+        patch: patch_input_type(orm_class.__table__),  # type: ignore
+        **kwids: object,
+    ) -> gql_type:  # type: ignore
+        """Update an existing record with the given field values.
+
+        Args:
+            info: The Strawberry resolver info containing the selection set
+                and custom context.
+            patch: Column name/value pairs used to update the record. Fields
+                left as ``strawberry.UNSET`` are not modified.
+            **kwids: Primary key column name/value pairs used to identify
+                the record.
+
+        Returns:
+            The updated ORM instance mapped to the GraphQL type.
+
+        Raises:
+            Exception: If no record is found for the given primary key(s).
+        """
+        statement = select(orm_class)
+        for key, id in kwids.items():
+            statement = statement.where(getattr(orm_class, key) == id)
+        async with async_session() as session:
+            await set_role(session, info.context.request.user)
+            result = (await session.execute(statement)).scalar_one_or_none()
+            if result is None:
+                raise Exception("not found")
+            for key, value in vars(patch).items():
+                if value is strawberry.UNSET:
+                    continue
+                setattr(result, key, value)
+            await session.commit()
+            await session.refresh(result)
+        return result
+
+    return {
+        ResolverType.LIST: list_resolver,
+        ResolverType.PK: pk_resolver,
+        ResolverType.CREATE: create_resolver,
+        ResolverType.UPDATE: update_resolver,
+    }[resolver_type]
 
 
 def build(_base: AutomapBase):
@@ -467,20 +605,21 @@ def build(_base: AutomapBase):
         A Litestar-compatible GraphQL controller ready to be mounted
         on the application.
     """
-    mapper = StrawberrySQLAlchemyMapper()
+
     for orm_class in _base.classes:
         table: Table = orm_class.__table__
         pks = table.primary_key.columns.keys()
-        strawberry.input(PaginationParams)
         orm_class: DeclarativeMeta = _base.classes.get(table.name)
-        gql_type = mapper.type(orm_class)(type(table.name, (object,), {}))
+        gql_type = _mapper.type(orm_class)(type(table.name, (object,), {}))
         order_by_type = create_order_by_input(table)
         where_type = create_where_input(table)
+        input_type = create_input_type(table)
+        patch_type = patch_input_type(table)
         setattr(
             Query,
             table.name,
             strawberry.field(
-                resolver=create_resolver(
+                resolver=resolver_factory(
                     orm_class,
                     gql_type,
                     ResolverType.LIST,
@@ -512,22 +651,66 @@ def build(_base: AutomapBase):
             Query,
             inflect.singular_noun(table.name),
             strawberry.field(
-                resolver=create_resolver(orm_class, gql_type, ResolverType.PK),
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.PK),
                 description=f"Get a {inflect.singular_noun(table.name)} by primary key.",
             ),
         )
         # dynamic pk arguments
         getattr(Query, inflect.singular_noun(table.name)).base_resolver.arguments = [
             StrawberryArgument(
-                pk, pk, StrawberryAnnotation(mapper._convert_column_to_strawberry_type(table.primary_key.columns[pk]))
+                pk, pk, StrawberryAnnotation(_mapper._convert_column_to_strawberry_type(table.primary_key.columns[pk]))
             )
             for pk in pks
         ]
+        setattr(
+            Mutation,
+            f"create{to_pascal(inflect.singular_noun(table.name))}",
+            strawberry.mutation(
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.CREATE),
+                description=f"Create a new {inflect.singular_noun(table.name)}.",
+            ),
+        )
+        # dynamic arguments
+        """getattr(Mutation, inflect.singular_noun(table.name)).base_resolver.arguments = [
+            StrawberryArgument(
+                col, col, StrawberryAnnotation(mapper._convert_column_to_strawberry_type(table.columns[col]))
+            )
+            for col in cols
+        ]"""
+        getattr(Mutation, f"create{to_pascal(inflect.singular_noun(table.name))}").base_resolver.arguments = [
+            StrawberryArgument("input", "input", StrawberryAnnotation(input_type))
+        ]
+        setattr(
+            Mutation,
+            f"update{to_pascal(inflect.singular_noun(table.name))}",
+            strawberry.mutation(
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.UPDATE),
+                description=f"Update an existing {inflect.singular_noun(table.name)} by primary key.",
+            ),
+        )
+        # dynamic patch + pk arguments for update mutation
+        getattr(Mutation, f"update{to_pascal(inflect.singular_noun(table.name))}").base_resolver.arguments = [
+            StrawberryArgument(
+                "patch",
+                "patch",
+                StrawberryAnnotation(patch_type),
+            ),
+            *[
+                StrawberryArgument(
+                    pk,
+                    pk,
+                    StrawberryAnnotation(_mapper._convert_column_to_strawberry_type(table.primary_key.columns[pk])),
+                )
+                for pk in pks
+            ],
+        ]
+
     # models that are related to models that are in the schema
     # are automatically mapped at this stage
-    mapper.finalize()
+    _mapper.finalize()
     schema = strawberry.Schema(
-        strawberry.type(Query),
+        query=strawberry.type(Query),
+        mutation=strawberry.type(Mutation),
         extensions=[
             QueryDepthLimiter(max_depth=10),
         ],
