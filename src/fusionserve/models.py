@@ -16,6 +16,9 @@ class ResolverType(Enum):
     PK = "pk"
     CREATE = "create"
     UPDATE = "update"
+    UPDATE_MANY = "update_many"
+    DELETE = "delete"
+    DELETE_MANY = "delete_many"
 
 
 @strawberry.enum

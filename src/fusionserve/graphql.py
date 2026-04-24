@@ -14,7 +14,7 @@ import strawberry
 from litestar import Request, WebSocket
 from litestar.datastructures import State
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import Table, and_, func, not_, or_, select
+from sqlalchemy import Table, and_, delete, func, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.automap import AutomapBase
 from sqlalchemy.orm import DeclarativeMeta
@@ -524,7 +524,8 @@ def resolver_factory(
             raise Exception("not found")
 
     async def create_resolver(
-        info: strawberry.Info[CustomHTTPContextType, None], input: create_input_type(orm_class.__table__)
+        info: strawberry.Info[CustomHTTPContextType, None],
+        input: create_input_type(orm_class.__table__),  # type: ignore
     ) -> gql_type:  # type: ignore
         """Create a new record with the given field values.
 
@@ -581,11 +582,131 @@ def resolver_factory(
             await session.refresh(result)
         return result
 
+    async def update_many_resolver(
+        info: strawberry.Info[CustomHTTPContextType, None],
+        patch: patch_input_type(orm_class.__table__),  # type: ignore
+        where: where_type,
+    ) -> list[gql_type]:  # type: ignore
+        """Apply the same patch to every row matching a where condition.
+
+        Issues a single ``UPDATE ... WHERE ... RETURNING *`` statement so the
+        affected rows can be returned to the caller without a separate
+        ``SELECT``.
+
+        Args:
+            info: The Strawberry resolver info containing the selection set
+                and custom context.
+            patch: Column name/value pairs applied to every matching row.
+                Fields left as ``strawberry.UNSET`` are not modified.
+            where: Filter input used to select the rows to update. An empty
+                or fully-UNSET ``where`` is rejected to prevent accidental
+                table-wide updates; pass explicit conditions to target all
+                rows.
+
+        Returns:
+            The list of updated ORM instances as they exist after the update.
+
+        Raises:
+            ValueError: If ``patch`` contains no set fields, or if ``where``
+                resolves to no filter condition.
+        """
+        patch_values = {k: v for k, v in vars(patch).items() if v is not strawberry.UNSET}
+        if not patch_values:
+            msg = "patch must contain at least one field to update"
+            raise ValueError(msg)
+        condition = apply_where(orm_class, where)
+        if condition is None:
+            msg = "where must contain at least one filter condition for update_many"
+            raise ValueError(msg)
+        statement = (
+            update(orm_class)
+            .where(condition)
+            .values(**patch_values)
+            .returning(orm_class)
+            .execution_options(synchronize_session=None)
+        )
+        async with async_session() as session:
+            await set_role(session, info.context.request.user)
+            rows = (await session.execute(statement)).scalars().all()
+            await session.commit()
+        return list(rows)
+
+    async def delete_resolver(info: strawberry.Info[CustomHTTPContextType, None], **kwids: object) -> gql_type:  # type: ignore
+        """Delete an existing record identified by its primary key(s).
+
+        Issues a single ``DELETE ... RETURNING *`` statement so the deleted
+        row can be returned to the caller without a separate ``SELECT``.
+
+        Args:
+            info: The Strawberry resolver info containing the selection set
+                and custom context.
+            **kwids: Primary key column name/value pairs used to identify
+                the record.
+
+        Returns:
+            The ORM instance representing the row as it existed immediately
+            before deletion.
+
+        Raises:
+            Exception: If no record is found for the given primary key(s).
+        """
+        statement = (
+            delete(orm_class)
+            .where(*[getattr(orm_class, key) == value for key, value in kwids.items()])
+            .returning(orm_class)
+            .execution_options(synchronize_session=None)
+        )
+        async with async_session() as session:
+            await set_role(session, info.context.request.user)
+            result = (await session.execute(statement)).scalar_one_or_none()
+            if result is None:
+                raise Exception("not found")
+            await session.commit()
+        return result
+
+    async def delete_many_resolver(
+        info: strawberry.Info[CustomHTTPContextType, None], where: where_type
+    ) -> list[gql_type]:  # type: ignore
+        """Delete every row matching a where condition.
+
+        Issues a single ``DELETE ... WHERE ... RETURNING *`` statement so the
+        deleted rows can be returned to the caller without a separate
+        ``SELECT``.
+
+        Args:
+            info: The Strawberry resolver info containing the selection set
+                and custom context.
+            where: Filter input used to select the rows to delete. An empty
+                or fully-UNSET ``where`` is rejected to prevent accidental
+                table-wide deletes; pass explicit conditions to target all
+                rows.
+
+        Returns:
+            The list of ORM instances representing the rows as they existed
+            immediately before deletion.
+
+        Raises:
+            ValueError: If ``where`` resolves to no filter condition.
+        """
+        condition = apply_where(orm_class, where)
+        if condition is None:
+            msg = "where must contain at least one filter condition for delete_many"
+            raise ValueError(msg)
+        statement = delete(orm_class).where(condition).returning(orm_class).execution_options(synchronize_session=None)
+        async with async_session() as session:
+            await set_role(session, info.context.request.user)
+            rows = (await session.execute(statement)).scalars().all()
+            await session.commit()
+        return list(rows)
+
     return {
         ResolverType.LIST: list_resolver,
         ResolverType.PK: pk_resolver,
         ResolverType.CREATE: create_resolver,
         ResolverType.UPDATE: update_resolver,
+        ResolverType.UPDATE_MANY: update_many_resolver,
+        ResolverType.DELETE: delete_resolver,
+        ResolverType.DELETE_MANY: delete_many_resolver,
     }[resolver_type]
 
 
@@ -703,6 +824,70 @@ def build(_base: AutomapBase):
                 )
                 for pk in pks
             ],
+        ]
+        setattr(
+            Mutation,
+            f"update{to_pascal(table.name)}",
+            strawberry.mutation(
+                resolver=resolver_factory(
+                    orm_class,
+                    gql_type,
+                    ResolverType.UPDATE_MANY,
+                    where_type=where_type,
+                ),
+                description=f"Update every {table.name} row matching the given where condition with the same patch.",
+            ),
+        )
+        # dynamic patch + where arguments for update_many mutation
+        getattr(Mutation, f"update{to_pascal(table.name)}").base_resolver.arguments = [
+            StrawberryArgument(
+                "patch",
+                "patch",
+                StrawberryAnnotation(patch_type),
+            ),
+            StrawberryArgument(
+                "where",
+                "where",
+                StrawberryAnnotation(where_type),  # type: ignore
+            ),
+        ]
+        setattr(
+            Mutation,
+            f"delete{to_pascal(inflect.singular_noun(table.name))}",
+            strawberry.mutation(
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.DELETE),
+                description=f"Delete an existing {inflect.singular_noun(table.name)} by primary key.",
+            ),
+        )
+        # dynamic pk arguments for delete mutation
+        getattr(Mutation, f"delete{to_pascal(inflect.singular_noun(table.name))}").base_resolver.arguments = [
+            StrawberryArgument(
+                pk,
+                pk,
+                StrawberryAnnotation(_mapper._convert_column_to_strawberry_type(table.primary_key.columns[pk])),
+            )
+            for pk in pks
+        ]
+        setattr(
+            Mutation,
+            f"delete{to_pascal(table.name)}",
+            strawberry.mutation(
+                resolver=resolver_factory(
+                    orm_class,
+                    gql_type,
+                    ResolverType.DELETE_MANY,
+                    where_type=where_type,
+                ),
+                description=f"Delete every {table.name} row matching the given where condition.",
+            ),
+        )
+        # dynamic where argument for delete_many mutation
+        getattr(Mutation, f"delete{to_pascal(table.name)}").base_resolver.arguments = [
+            StrawberryArgument(
+                "where",
+                "where",
+                StrawberryAnnotation(where_type),  # type: ignore
+            ),
         ]
 
     # models that are related to models that are in the schema
