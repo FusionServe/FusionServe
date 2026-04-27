@@ -301,7 +301,7 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
     return ItemController
 
 
-def build_controllers(_base: AutomapBase, _registry: dict[str, RegistryItem]) -> list[litestar.Controller]:
+def build(_base: AutomapBase, _registry: dict[str, RegistryItem]) -> list[litestar.Controller]:
     """Build and return a list of Litestar controllers for every registered table.
 
     Iterates over *_registry*, calls :func:`create_controller` for each entry,

@@ -143,7 +143,9 @@ class Mutation:
     pass
 
 
-def columns_from_selections(selections: list[strawberry.types.nodes.Selection], table: DeclarativeMeta) -> list[str]:
+def columns_from_selections(
+    selections: list[strawberry.types.nodes.Selection], orm_class: DeclarativeMeta
+) -> list[str]:
     """Extract column names from a Strawberry GraphQL selection set.
 
     Recursively traverses the selection AST and collects snake_case
@@ -163,7 +165,7 @@ def columns_from_selections(selections: list[strawberry.types.nodes.Selection], 
     for selection in selections:
         if (
             isinstance(selection, strawberry.types.nodes.SelectedField)
-            and to_snake_case(selection.name) in table.__table__.columns
+            and to_snake_case(selection.name) in orm_class.__table__.columns
         ):
             selected_columns.append(to_snake_case(selection.name))
         if isinstance(selection, strawberry.types.nodes.FragmentSpread):
@@ -171,7 +173,7 @@ def columns_from_selections(selections: list[strawberry.types.nodes.Selection], 
             selected_columns.extend(cols)
         if len(selection.selections) > 0:
             # recursively get nested selections
-            selected_columns.extend(columns_from_selections(selection.selections, table))
+            selected_columns.extend(columns_from_selections(selection.selections, orm_class))
     return selected_columns
 
 
@@ -422,8 +424,6 @@ def resolver_factory(
     orm_class: DeclarativeMeta,
     gql_type,
     resolver_type: ResolverType,
-    order_by_type: type | None = None,
-    where_type: type | None = None,
 ):
     """Create a Strawberry resolver function for a given table and resolver type.
 
@@ -449,8 +449,8 @@ def resolver_factory(
         info: strawberry.Info[CustomHTTPContextType, None],
         limit: int = settings.max_page_length,
         offset: int = 0,
-        order_by: order_by_type | None = None,  # type: ignore
-        where: where_type | None = None,  # type: ignore
+        order_by: create_order_by_input(orm_class.__table__) | None = None,  # type: ignore
+        where: create_where_input(orm_class.__table__) | None = None,  # type: ignore
     ) -> PaginationWindow[gql_type]:  # type: ignore
         """Resolve a paginated list of records for the table.
 
@@ -585,7 +585,7 @@ def resolver_factory(
     async def update_many_resolver(
         info: strawberry.Info[CustomHTTPContextType, None],
         patch: patch_input_type(orm_class.__table__),  # type: ignore
-        where: where_type,
+        where: create_where_input(orm_class.__table__),  # type: ignore
     ) -> list[gql_type]:  # type: ignore
         """Apply the same patch to every row matching a where condition.
 
@@ -665,7 +665,8 @@ def resolver_factory(
         return result
 
     async def delete_many_resolver(
-        info: strawberry.Info[CustomHTTPContextType, None], where: where_type
+        info: strawberry.Info[CustomHTTPContextType, None],
+        where: create_where_input(orm_class.__table__),  # type: ignore
     ) -> list[gql_type]:  # type: ignore
         """Delete every row matching a where condition.
 
@@ -732,10 +733,6 @@ def build(_base: AutomapBase):
         pks = table.primary_key.columns.keys()
         orm_class: DeclarativeMeta = _base.classes.get(table.name)
         gql_type = _mapper.type(orm_class)(type(table.name, (object,), {}))
-        order_by_type = create_order_by_input(table)
-        where_type = create_where_input(table)
-        input_type = create_input_type(table)
-        patch_type = patch_input_type(table)
         setattr(
             Query,
             table.name,
@@ -744,8 +741,6 @@ def build(_base: AutomapBase):
                     orm_class,
                     gql_type,
                     ResolverType.LIST,
-                    order_by_type=order_by_type,
-                    where_type=where_type,
                 ),
                 description=f"List {table.name} with pagination, filtering and ordering.",
             ),
@@ -758,13 +753,13 @@ def build(_base: AutomapBase):
             StrawberryArgument(
                 "order_by",
                 "order_by",
-                StrawberryAnnotation(order_by_type | None),  # type: ignore
+                StrawberryAnnotation(create_order_by_input(orm_class.__table__) | None),  # type: ignore
                 default=strawberry.UNSET,
             ),
             StrawberryArgument(
                 "where",
                 "where",
-                StrawberryAnnotation(where_type | None),  # type: ignore
+                StrawberryAnnotation(create_where_input(orm_class.__table__) | None),  # type: ignore
                 default=strawberry.UNSET,
             ),
         ]
@@ -799,7 +794,7 @@ def build(_base: AutomapBase):
             for col in cols
         ]"""
         getattr(Mutation, f"create{to_pascal(inflect.singular_noun(table.name))}").base_resolver.arguments = [
-            StrawberryArgument("input", "input", StrawberryAnnotation(input_type))
+            StrawberryArgument("input", "input", StrawberryAnnotation(create_input_type(orm_class.__table__)))
         ]
         setattr(
             Mutation,
@@ -814,7 +809,7 @@ def build(_base: AutomapBase):
             StrawberryArgument(
                 "patch",
                 "patch",
-                StrawberryAnnotation(patch_type),
+                StrawberryAnnotation(patch_input_type(orm_class.__table__)),
             ),
             *[
                 StrawberryArgument(
@@ -833,7 +828,6 @@ def build(_base: AutomapBase):
                     orm_class,
                     gql_type,
                     ResolverType.UPDATE_MANY,
-                    where_type=where_type,
                 ),
                 description=f"Update every {table.name} row matching the given where condition with the same patch.",
             ),
@@ -843,12 +837,12 @@ def build(_base: AutomapBase):
             StrawberryArgument(
                 "patch",
                 "patch",
-                StrawberryAnnotation(patch_type),
+                StrawberryAnnotation(patch_input_type(orm_class.__table__)),
             ),
             StrawberryArgument(
                 "where",
                 "where",
-                StrawberryAnnotation(where_type),  # type: ignore
+                StrawberryAnnotation(create_where_input(orm_class.__table__)),  # type: ignore
             ),
         ]
         setattr(
@@ -876,7 +870,6 @@ def build(_base: AutomapBase):
                     orm_class,
                     gql_type,
                     ResolverType.DELETE_MANY,
-                    where_type=where_type,
                 ),
                 description=f"Delete every {table.name} row matching the given where condition.",
             ),
@@ -886,7 +879,7 @@ def build(_base: AutomapBase):
             StrawberryArgument(
                 "where",
                 "where",
-                StrawberryAnnotation(where_type),  # type: ignore
+                StrawberryAnnotation(create_where_input(orm_class.__table__)),  # type: ignore
             ),
         ]
 
