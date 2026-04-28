@@ -15,6 +15,7 @@ class ResolverType(Enum):
     LIST = "list"
     PK = "pk"
     CREATE = "create"
+    CREATE_MANY = "create_many"
     UPDATE = "update"
     UPDATE_MANY = "update_many"
     DELETE = "delete"

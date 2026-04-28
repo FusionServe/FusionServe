@@ -7,6 +7,7 @@ then exposed via a Litestar-compatible GraphQL controller.
 """
 
 import logging
+from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
 import inflect as _inflect
@@ -14,8 +15,7 @@ import strawberry
 from litestar import Request, WebSocket
 from litestar.datastructures import State
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import Table, and_, delete, func, not_, or_, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import Table, and_, delete, func, insert, not_, or_, select, update
 from sqlalchemy.ext.automap import AutomapBase
 from sqlalchemy.orm import DeclarativeMeta
 from sqlalchemy.sql.expression import ColumnElement
@@ -29,7 +29,7 @@ from strawberry.litestar import (
 )
 from strawberry.types.arguments import StrawberryArgument
 from strawberry.utils.str_converters import to_snake_case
-from strawberry_sqlalchemy_mapper import StrawberrySQLAlchemyMapper
+from strawberry_sqlalchemy_mapper import StrawberrySQLAlchemyLoader, StrawberrySQLAlchemyMapper
 
 from .auth import User
 from .config import settings
@@ -41,7 +41,7 @@ _logger = logging.getLogger(settings.app_name)
 inflect = _inflect.engine()
 inflect.classical(names=0)
 
-_mapper = StrawberrySQLAlchemyMapper()
+_mapper = StrawberrySQLAlchemyMapper(always_use_list=True)
 
 Item = TypeVar("Item")
 
@@ -81,13 +81,17 @@ class PaginationWindow[Item]:
 
 
 class CustomContext(BaseContext, kw_only=True):
-    """Custom Strawberry context that carries an async SQLAlchemy session.
+    """Custom Strawberry context carrying the SQLAlchemy relationship loader.
 
     Attributes:
-        session: The active async SQLAlchemy session for the current request.
+        sqlalchemy_loader: The dataloader used by the strawberry-sqlalchemy
+            mapper to resolve relationship fields. Configured with an
+            ``async_bind_factory`` that opens a fresh session per batch and
+            applies the authenticated user's PostgreSQL role so row-level
+            security stays consistent with the CRUD resolvers.
     """
 
-    session: AsyncSession
+    sqlalchemy_loader: StrawberrySQLAlchemyLoader
 
 
 class CustomHTTPContextType(HTTPContextType, CustomContext):
@@ -110,17 +114,36 @@ class CustomWSContextType(WebSocketContextType, CustomContext):
     socket: WebSocket[User, Any, State]
 
 
-async def custom_context_getter(request: Request, session: AsyncSession) -> CustomContext:
+async def custom_context_getter(request: Request) -> CustomContext:
     """Create a custom Strawberry context for each GraphQL request.
+
+    The SQLAlchemy relationship loader receives an ``async_bind_factory`` that
+    opens a fresh async session for each batch of related-row fetches and
+    applies the request user's PostgreSQL role before yielding, so row-level
+    security stays consistent with the CRUD resolvers.
 
     Args:
         request: The incoming Litestar HTTP request.
-        session: The async SQLAlchemy session provided by dependency injection.
 
     Returns:
-        A ``CustomContext`` instance wrapping the session.
+        A ``CustomContext`` wrapping a configured
+        :class:`StrawberrySQLAlchemyLoader`.
     """
-    return CustomContext(session=session)
+
+    @asynccontextmanager
+    async def loader_bind():
+        async with async_session() as loader_session:
+            await set_role(loader_session, request.user)
+            yield loader_session
+
+    return CustomContext(
+        sqlalchemy_loader=StrawberrySQLAlchemyLoader(async_bind_factory=loader_bind),
+    )
+
+
+@strawberry.experimental.pydantic.type(model=User, all_fields=True)
+class UserType:
+    pass
 
 
 class Query:
@@ -130,7 +153,9 @@ class Query:
     registered database table.
     """
 
-    pass
+    @strawberry.field
+    def current_user(self, info: strawberry.Info[CustomHTTPContextType, None]) -> UserType | None:
+        return info.context.request.user or None
 
 
 class Mutation:
@@ -152,14 +177,23 @@ def columns_from_selections(
     column names that exist on the given ORM table. Handles both
     ``SelectedField`` and ``FragmentSpread`` node types.
 
+    Foreign-key columns on ``orm_class`` are always appended to the result,
+    regardless of whether the client selected them. ``load_only`` defers
+    every non-PK column it isn't told to keep, and the strawberry-sqlalchemy
+    mapper's relationship loader needs the FK value on the parent row to
+    resolve to-one relationships — without this, queries like
+    ``{ order { user { name } } }`` lose access to ``order.user_id`` and the
+    related lookup silently fails.
+
     Args:
         selections: The list of Strawberry selection nodes to inspect.
-        table: The SQLAlchemy ORM class whose ``__table__.columns``
-            are used to validate column existence.
+        orm_class: The SQLAlchemy ORM class whose ``__table__.columns``
+            are used to validate column existence and to enumerate FKs.
 
     Returns:
-        A list of column name strings in snake_case that match actual
-        table columns.
+        A list of column name strings in snake_case containing every
+        explicitly-selected scalar column plus every foreign-key column on
+        ``orm_class``.
     """
     selected_columns: list[str] = []
     for selection in selections:
@@ -174,6 +208,11 @@ def columns_from_selections(
         if len(selection.selections) > 0:
             # recursively get nested selections
             selected_columns.extend(columns_from_selections(selection.selections, orm_class))
+    # Always include FK columns so the mapper's relationship loader can
+    # resolve to-one relationships even when the FK wasn't selected.
+    for column in orm_class.__table__.columns:
+        if column.foreign_keys and column.name not in selected_columns:
+            selected_columns.append(column.name)
     return selected_columns
 
 
@@ -545,6 +584,41 @@ def resolver_factory(
             await session.refresh(instance)
         return instance
 
+    async def create_many_resolver(
+        info: strawberry.Info[CustomHTTPContextType, None],
+        inputs: list[create_input_type(orm_class.__table__)],  # type: ignore
+    ) -> list[gql_type]:  # type: ignore
+        """Insert many records in a single statement.
+
+        Issues a single ``INSERT ... VALUES (...), (...) RETURNING *`` so the
+        created rows can be returned without a separate ``SELECT`` and without
+        N round-trips. The whole insert is atomic — any constraint violation
+        rolls back every row.
+
+        Args:
+            info: The Strawberry resolver info containing the selection set
+                and custom context.
+            inputs: List of column-name/value sets used to populate the new
+                records. Fields left as ``strawberry.UNSET`` fall back to the
+                column's default or NULL.
+
+        Returns:
+            The newly-created ORM instances mapped to the GraphQL type, in
+            input order.
+
+        Raises:
+            ValueError: If ``inputs`` is empty.
+        """
+        if not inputs:
+            raise ValueError("inputs must contain at least one record to create")
+        rows = [{k: v for k, v in vars(item).items() if v is not strawberry.UNSET} for item in inputs]
+        statement = insert(orm_class).values(rows).returning(orm_class)
+        async with async_session() as session:
+            await set_role(session, info.context.request.user)
+            result = (await session.execute(statement)).scalars().all()
+            await session.commit()
+        return list(result)
+
     async def update_resolver(
         info: strawberry.Info[CustomHTTPContextType, None],
         patch: patch_input_type(orm_class.__table__),  # type: ignore
@@ -704,6 +778,7 @@ def resolver_factory(
         ResolverType.LIST: list_resolver,
         ResolverType.PK: pk_resolver,
         ResolverType.CREATE: create_resolver,
+        ResolverType.CREATE_MANY: create_many_resolver,
         ResolverType.UPDATE: update_resolver,
         ResolverType.UPDATE_MANY: update_many_resolver,
         ResolverType.DELETE: delete_resolver,
@@ -794,6 +869,22 @@ def build(_base: AutomapBase):
         ]"""
         getattr(Mutation, f"create{to_pascal(inflect.singular_noun(table.name))}").base_resolver.arguments = [
             StrawberryArgument("input", "input", StrawberryAnnotation(create_input_type(orm_class.__table__)))
+        ]
+        setattr(
+            Mutation,
+            f"create{to_pascal(table.name)}",
+            strawberry.mutation(
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.CREATE_MANY),
+                description=f"Create many {table.name} rows in a single statement.",
+            ),
+        )
+        # dynamic inputs argument for create_many mutation
+        getattr(Mutation, f"create{to_pascal(table.name)}").base_resolver.arguments = [
+            StrawberryArgument(
+                "inputs",
+                "inputs",
+                StrawberryAnnotation(list[create_input_type(orm_class.__table__)]),  # type: ignore
+            ),
         ]
         setattr(
             Mutation,
