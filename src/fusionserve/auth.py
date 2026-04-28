@@ -66,7 +66,7 @@ async def _get_jwk_client() -> PyJWKClient:
     Returns:
         The shared ``PyJWKClient`` instance used for signing key lookups.
     """
-    global jwk_client  # noqa: PLW0603
+    global jwk_client
     if jwk_client is None:
         jwks_url = await _resolve_jwks_url()
         jwk_client = PyJWKClient(
@@ -186,7 +186,7 @@ async def retrieve_user_handler(token: str) -> User | None:
     sub = payload.get("sub")
     if not sub:
         return None
-    user = User(
+    return User(
         id=JSONPointer(settings.claims_map.id).resolve(payload),
         username=JSONPointer(settings.claims_map.username).resolve(payload),
         email=JSONPointer(settings.claims_map.email).resolve(payload),
@@ -196,4 +196,3 @@ async def retrieve_user_handler(token: str) -> User | None:
         role=JSONPointer(settings.claims_map.role).resolve(payload),
         roles=JSONPointer(settings.claims_map.roles).resolve(payload),
     )
-    return user

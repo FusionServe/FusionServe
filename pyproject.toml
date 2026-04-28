@@ -83,6 +83,31 @@ select = [
     "SIM",
     # isort
     "I",
+    # flake8-logging-format (catches f-strings inside .info/.error/etc.)
+    "G",
+    # flake8-logging
+    "LOG",
+    # flake8-async (sync-in-async footguns)
+    "ASYNC",
+    # flake8-pytest-style
+    "PT",
+    # flake8-return
+    "RET",
+    # flake8-comprehensions
+    "C4",
+    # flake8-pie (misc)
+    "PIE",
+    # flake8-tidy-imports
+    "TID",
+    # Ruff-specific
+    "RUF",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use bare `assert`, lots of dynamic attribute access, and small
+# fixtures — relax a few rules that are noisy without adding signal.
+"tests/**" = [
+    "RUF012",  # mutable class attrs in dataclass-style stubs
 ]
 
 [tool.pytest.ini_options]

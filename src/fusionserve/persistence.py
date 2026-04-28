@@ -44,6 +44,9 @@ current_user_id_ddl = DDL(
     """
 )
 
+#: Shared :mod:`inflect` engine used across the codebase. Constructed once
+#: and configured with ``classical(names=0)`` so plurals follow modern
+#: usage (e.g. ``persons`` rather than ``people``).
 inflect = _inflect.engine()
 inflect.classical(names=0)
 

@@ -7,9 +7,8 @@ field-level filtering, and OData-style advanced filters.
 """
 
 import logging
-from typing import Annotated
+from typing import Annotated, ClassVar
 
-import inflect as _inflect
 import litestar
 import odata_query
 import odata_query.exceptions
@@ -30,12 +29,9 @@ from . import auth
 from .config import settings
 from .di import create_filter_dependencies
 from .models import AdvancedFilter
-from .persistence import parse_comments, pydantic_field_from_column, set_role
+from .persistence import inflect, parse_comments, pydantic_field_from_column, set_role
 
 _logger = logging.getLogger(settings.app_name)
-
-inflect = _inflect.engine()
-inflect.classical(names=0)
 # tags_metadata = []
 
 
@@ -174,7 +170,7 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
                 "pagination_size": settings.default_page_size,
             }
         )
-        tags = [f"{table.name}: {comment.content if comment.content else ''}"]
+        tags: ClassVar[list[str]] = [f"{table.name}: {comment.content if comment.content else ''}"]
 
         @litestar.get(
             summary=f"List {table_name}",
@@ -372,7 +368,7 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
                     from ``request.path_params``.
 
             Returns:
-                ``None`` – HTTP 204 No Content is returned on success.
+                ``None`` - HTTP 204 No Content is returned on success.
 
             Raises:
                 litestar.exceptions.NotFoundException: If no record with the

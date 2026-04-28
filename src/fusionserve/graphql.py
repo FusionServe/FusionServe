@@ -10,7 +10,6 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
-import inflect as _inflect
 import strawberry
 from litestar import Request, WebSocket
 from litestar.datastructures import State
@@ -34,12 +33,9 @@ from strawberry_sqlalchemy_mapper import StrawberrySQLAlchemyLoader, StrawberryS
 from .auth import User
 from .config import settings
 from .models import COMPARISON_TYPE_MAP, RecordNotFoundError, ResolverType, SortDirection
-from .persistence import apply_load_only, async_session, set_role
+from .persistence import apply_load_only, async_session, inflect, set_role
 
 _logger = logging.getLogger(settings.app_name)
-
-inflect = _inflect.engine()
-inflect.classical(names=0)
 
 Item = TypeVar("Item")
 
@@ -535,8 +531,7 @@ def resolver_factory(
                 nodes=[row[0] for row in rows if row[0] is not None],
                 total_count=rows[0][1],
             )
-        else:
-            return PaginationWindow[gql_type](nodes=[], total_count=0)
+        return PaginationWindow[gql_type](nodes=[], total_count=0)
 
     async def pk_resolver(info: strawberry.Info[CustomHTTPContextType, None], **kwids: object) -> gql_type:  # type: ignore
         """Resolve a single record by its primary key(s).
@@ -1020,7 +1015,7 @@ def build(_base: AutomapBase):
             QueryDepthLimiter(max_depth=10),
         ],
     )
-    controller = make_graphql_controller(
+    return make_graphql_controller(
         schema,
         path=f"{settings.base_path}/graphql",
         context_getter=custom_context_getter,
@@ -1028,4 +1023,3 @@ def build(_base: AutomapBase):
         graphql_ide="graphiql",
         keep_alive=True,
     )
-    return controller

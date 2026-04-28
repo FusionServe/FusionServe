@@ -79,6 +79,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `integration-test` job runs `-m integration` with `RUN_INTEGRATION=1` so
   Docker-backed tests get coverage on every push.
 
+### Tooling
+
+- Ruff `select` expanded to add `G`, `LOG`, `ASYNC`, `PT`, `RET`, `C4`,
+  `PIE`, `TID`, and `RUF`. The new rules surfaced (and we fixed) several
+  unused `noqa` directives, dead `else` branches after `return`, EN-DASH
+  characters in docstrings, and a `RUF012` mutable class attribute on the
+  generated REST controller's `tags`.
+- `src/fusionserve/di.py` shrank from ~720 lines of vendored
+  `advanced_alchemy` provider helpers down to a 30-line re-export of
+  upstream symbols. Internal callers (and any external code that used
+  ``from fusionserve.di import …``) keep working.
+- `inflect` engine is now constructed once in `persistence` and re-used
+  by `rest` and `graphql`. The three duplicate engines (and their
+  duplicate ``classical(names=0)`` calls) are gone.
+
 ## [0.1.0] - YYYY-MM-DD
 
 Initial public version.
