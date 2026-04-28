@@ -1,50 +1,60 @@
 [project]
 name = "FusionServe"
-version = "0.1"
+version = "0.1.0"
 description = "Automatic generation of REST and GraphQL APIs by db introspection."
 authors = [
     { name = "Marco Frassinelli", email = "fras.marco@gmail.com" }
 ]
-license = { file = "LICENSE.txt" }
+license = "MIT"
+license-files = ["LICENSE.txt"]
 readme = { file = "README.md", content-type = "text/markdown" }
-platforms = ["any"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
     "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "advanced-alchemy>=1.9.3",
     "asyncpg",
     "brotli>=1.2.0",
+    # Both granian and uvicorn are supported runtime servers.
+    # Dockerfile and CI default to uvicorn; granian is offered as an
+    # optional faster runner for production deployments.
     "granian[dotenv,pname,reload,rloop,uvloop]>=2.7.2",
-    "icecream>=2.1.10",
+    "httpx",
     "importlib-metadata",
     "inflect",
-    "PyJWT[crypto]>=2.9.0",
     "litestar>=2.21.0",
     "odata-query",
     "prometheus_client",
-    "psycopg",
-    "psycopg-binary",
+    "psycopg[binary]",
     "pydantic[email]",
     "pydantic-settings>=2.13.1",
     "pydantic_core",
+    "PyJWT[crypto]>=2.9.0",
+    "python-jsonpath>=2.0.2",
     "python-multipart",
     "sqlalchemy",
     "strawberry-graphql",
     "strawberry-sqlalchemy-mapper>=0.8.0",
-    "suds",
     "typing-extensions",
     "uvicorn[standard]>=0.41.0",
-    "advanced-alchemy>=1.9.3",
-    "python-jsonpath>=2.0.2",
 ]
 
 [build-system]
-requires = ["uv_build>=0.9.26,<0.10.0"]
+requires = ["uv_build>=0.9.26,<0.11.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "icecream>=2.1.10",
     "mkdocs-gen-files>=0.6.1",
     "mkdocs-literate-nav>=0.6.3",
     "mkdocs-material>=9.7.6",
@@ -52,11 +62,7 @@ dev = [
     "pre-commit>=4.5.1",
     "pytest>=9.0.3",
     "ruff>=0.15.4",
-    "uvicorn[standard]>=0.41.0",
 ]
-
-[project.scripts]
-fusionserve = "fusionserve.main:run"
 
 [tool.ruff]
 line-length = 120

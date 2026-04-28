@@ -367,21 +367,20 @@ wheels = [
 
 [[package]]
 name = "fusionserve"
-version = "0.1"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "advanced-alchemy" },
     { name = "asyncpg" },
     { name = "brotli" },
     { name = "granian", extra = ["dotenv", "pname", "reload", "rloop", "uvloop"] },
-    { name = "icecream" },
+    { name = "httpx" },
     { name = "importlib-metadata" },
     { name = "inflect" },
     { name = "litestar" },
     { name = "odata-query" },
     { name = "prometheus-client" },
-    { name = "psycopg" },
-    { name = "psycopg-binary" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "pydantic", extra = ["email"] },
     { name = "pydantic-core" },
     { name = "pydantic-settings" },
@@ -391,13 +390,13 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "strawberry-graphql" },
     { name = "strawberry-sqlalchemy-mapper" },
-    { name = "suds" },
     { name = "typing-extensions" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "icecream" },
     { name = "mkdocs-gen-files" },
     { name = "mkdocs-literate-nav" },
     { name = "mkdocs-material" },
@@ -405,7 +404,6 @@ dev = [
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "ruff" },
-    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.metadata]
@@ -414,14 +412,13 @@ requires-dist = [
     { name = "asyncpg" },
     { name = "brotli", specifier = ">=1.2.0" },
     { name = "granian", extras = ["dotenv", "pname", "reload", "rloop", "uvloop"], specifier = ">=2.7.2" },
-    { name = "icecream", specifier = ">=2.1.10" },
+    { name = "httpx" },
     { name = "importlib-metadata" },
     { name = "inflect" },
     { name = "litestar", specifier = ">=2.21.0" },
     { name = "odata-query" },
     { name = "prometheus-client" },
-    { name = "psycopg" },
-    { name = "psycopg-binary" },
+    { name = "psycopg", extras = ["binary"] },
     { name = "pydantic", extras = ["email"] },
     { name = "pydantic-core" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
@@ -431,13 +428,13 @@ requires-dist = [
     { name = "sqlalchemy" },
     { name = "strawberry-graphql" },
     { name = "strawberry-sqlalchemy-mapper", specifier = ">=0.8.0" },
-    { name = "suds" },
     { name = "typing-extensions" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.41.0" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "icecream", specifier = ">=2.1.10" },
     { name = "mkdocs-gen-files", specifier = ">=0.6.1" },
     { name = "mkdocs-literate-nav", specifier = ">=0.6.3" },
     { name = "mkdocs-material", specifier = ">=9.7.6" },
@@ -445,7 +442,6 @@ dev = [
     { name = "pre-commit", specifier = ">=4.5.1" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "ruff", specifier = ">=0.15.4" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.41.0" },
 ]
 
 [[package]]
@@ -1165,6 +1161,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/5b/181e2e3becb7672b502f0ed7f16ed7352aca7c109cfb94cf3878a9186db9/psycopg-3.3.3-py3-none-any.whl", hash = "sha256:f96525a72bcfade6584ab17e89de415ff360748c766f0106959144dcbb38c698", size = 212768, upload-time = "2026-02-18T16:46:27.365Z" },
 ]
 
+[package.optional-dependencies]
+binary = [
+    { name = "psycopg-binary", marker = "implementation_name != 'pypy'" },
+]
+
 [[package]]
 name = "psycopg-binary"
 version = "3.3.3"
@@ -1635,15 +1636,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/86/ff/ccdc54830a357ca898aae2368807f6522f5a1bc2cefe24255f2d6c5ad026/strawberry_sqlalchemy_mapper-0.8.0.tar.gz", hash = "sha256:8de01e616d0afe8a325736ea5483a1d9f439b5febb0c43449fe68e157735da70", size = 30132, upload-time = "2025-12-01T19:18:09.624Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f2/1f/cae88ec6f0b45f983972801c0ba093f7332e4b099ff3b48bbc1c6bb937f8/strawberry_sqlalchemy_mapper-0.8.0-py3-none-any.whl", hash = "sha256:7341327c31898547ccbc3e50c01f8c1dc009af0fb90a5c71aeda857016fb870c", size = 29376, upload-time = "2025-12-01T19:18:08.699Z" },
-]
-
-[[package]]
-name = "suds"
-version = "1.2.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/3e/a1/c3783be8de318678c822d6edf9855729c528ba06ac9004398c225ecf2dbd/suds-1.2.0.tar.gz", hash = "sha256:83b162c3d2355374e11d8b9acf15eeaa158b416b4625821844f9f628d679deaf", size = 271331, upload-time = "2024-08-24T20:07:28.95Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/43/658bd1825a5f58c1182269eaa6165084d8d95e031cd7e34a2a1bcf773579/suds-1.2.0-py3-none-any.whl", hash = "sha256:2cf8ed43ed8a0df350027c741f5295d6be8443d4e820cb36f2c17b033e331d5b", size = 145151, upload-time = "2024-08-24T20:07:27.206Z" },
 ]
 
 [[package]]

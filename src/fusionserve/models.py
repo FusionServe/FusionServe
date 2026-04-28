@@ -175,3 +175,11 @@ class PaginationParams(BaseModel):
 class SmartComment(BaseModel):
     metadata: dict[str, Any] | None = None
     content: str | None = None
+
+
+class RecordNotFoundError(Exception):
+    """Raised when a resolver cannot find a record by primary key.
+
+    Used by GraphQL resolvers (PK lookup, update, delete) so callers see
+    a typed, message-bearing error rather than a bare ``Exception``.
+    """

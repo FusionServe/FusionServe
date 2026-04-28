@@ -94,7 +94,9 @@ def introspect() -> AutomapBase:
     Raises:
         ValueError: If any reflected table has a non-plural name.
     """
-    # Introspection is only supported for sync engines
+    # Introspection is only supported for sync engines.
+    # Scope the engine to this function so its connection pool is disposed
+    # before we return — we never use it again at runtime.
     _engine = create_engine(
         f"postgresql+psycopg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
         f"{settings.pg_host}:"
@@ -102,11 +104,15 @@ def introspect() -> AutomapBase:
         echo=settings.echo_sql,
         pool_pre_ping=True,
     )
-    with _engine.begin() as connection:
-        _logger.debug("Running DDL to create current_user_id() function")
-        connection.execute(current_user_id_ddl)
-    metadata = MetaData()
-    metadata.reflect(bind=_engine, schema=settings.pg_app_schema)
+    try:
+        with _engine.begin() as connection:
+            _logger.debug("Running DDL to create current_user_id() function")
+            connection.execute(current_user_id_ddl)
+        metadata = MetaData()
+        metadata.reflect(bind=_engine, schema=settings.pg_app_schema)
+    finally:
+        _engine.dispose()
+
     Base = automap_base(metadata=metadata)
     # calling prepare() just sets up mapped classes and relationships.
     Base.prepare()

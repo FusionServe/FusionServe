@@ -36,7 +36,7 @@ async def _resolve_jwks_url() -> str:
         The URL of the JSON Web Key Set (JWKS) endpoint.
 
     Raises:
-        AssertionError: If neither ``settings.jwks_url`` nor
+        RuntimeError: If neither ``settings.jwks_url`` nor
             ``settings.jwt_issuer`` is configured.
         httpx.HTTPStatusError: If the OIDC discovery request fails.
         KeyError: If the discovery document lacks a ``jwks_uri`` field.
@@ -46,7 +46,8 @@ async def _resolve_jwks_url() -> str:
         return settings.jwks_url
 
     # Discover via OIDC well-known, fail otherwise
-    assert settings.jwt_issuer is not None
+    if settings.jwt_issuer is None:
+        raise RuntimeError("Either settings.jwks_url or settings.jwt_issuer must be configured to verify JWTs")
     well_known_url = f"{settings.jwt_issuer.rstrip('/')}/.well-known/openid-configuration"
     async with httpx.AsyncClient() as client:
         resp = await client.get(well_known_url, timeout=10)
@@ -132,8 +133,9 @@ async def verify_and_decode(token: str) -> dict[str, Any]:
     except jwt.InvalidTokenError as exc:
         _logger.warning("JWT verification failed: %s", exc)
         raise NotAuthorizedException("Invalid token") from exc
-    except Exception as exc:
-        _logger.warning("JWT verification failed: %s", exc)
+    except (httpx.HTTPError, jwt.PyJWKClientError) as exc:
+        # Network failure fetching JWKS, or PyJWKClient could not resolve a key.
+        _logger.warning("JWKS resolution failed: %s", exc)
         raise NotAuthorizedException("Invalid token") from exc
 
 

@@ -33,7 +33,7 @@ from strawberry_sqlalchemy_mapper import StrawberrySQLAlchemyLoader, StrawberryS
 
 from .auth import User
 from .config import settings
-from .models import COMPARISON_TYPE_MAP, ResolverType, SortDirection
+from .models import COMPARISON_TYPE_MAP, RecordNotFoundError, ResolverType, SortDirection
 from .persistence import apply_load_only, async_session, set_role
 
 _logger = logging.getLogger(settings.app_name)
@@ -544,7 +544,7 @@ def resolver_factory(
             The matching ORM instance mapped to the GraphQL type.
 
         Raises:
-            Exception: If no record is found for the given primary key(s).
+            RecordNotFoundError: If no record is found for the given primary key(s).
         """
         statement = select(orm_class)
         for key, id in kwids.items():
@@ -556,11 +556,10 @@ def resolver_factory(
         # the context session is managed at the request level so we need a new one here
         async with async_session() as session:
             await set_role(session, info.context.request.user)
-            result = (await session.execute(statement)).scalar_one()
-        if result:
-            return result
-        else:
-            raise Exception("not found")
+            result = (await session.execute(statement)).scalar_one_or_none()
+        if result is None:
+            raise RecordNotFoundError(f"No {orm_class.__table__.name} record matches {kwids}")
+        return result
 
     async def create_resolver(
         info: strawberry.Info[CustomHTTPContextType, None],
@@ -638,7 +637,7 @@ def resolver_factory(
             The updated ORM instance mapped to the GraphQL type.
 
         Raises:
-            Exception: If no record is found for the given primary key(s).
+            RecordNotFoundError: If no record is found for the given primary key(s).
         """
         statement = select(orm_class)
         for key, id in kwids.items():
@@ -647,7 +646,7 @@ def resolver_factory(
             await set_role(session, info.context.request.user)
             result = (await session.execute(statement)).scalar_one_or_none()
             if result is None:
-                raise Exception("not found")
+                raise RecordNotFoundError(f"No {orm_class.__table__.name} record matches {kwids}")
             for key, value in vars(patch).items():
                 if value is strawberry.UNSET:
                     continue
@@ -722,7 +721,7 @@ def resolver_factory(
             before deletion.
 
         Raises:
-            Exception: If no record is found for the given primary key(s).
+            RecordNotFoundError: If no record is found for the given primary key(s).
         """
         statement = (
             delete(orm_class)
@@ -734,7 +733,7 @@ def resolver_factory(
             await set_role(session, info.context.request.user)
             result = (await session.execute(statement)).scalar_one_or_none()
             if result is None:
-                raise Exception("not found")
+                raise RecordNotFoundError(f"No {orm_class.__table__.name} record matches {kwids}")
             await session.commit()
         return result
 
