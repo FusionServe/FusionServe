@@ -731,7 +731,6 @@ def build(_base: AutomapBase):
     for orm_class in _base.classes:
         table: Table = orm_class.__table__
         pks = table.primary_key.columns.keys()
-        orm_class: DeclarativeMeta = _base.classes.get(table.name)
         gql_type = _mapper.type(orm_class)(type(table.name, (object,), {}))
         setattr(
             Query,

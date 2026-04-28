@@ -19,6 +19,8 @@ from litestar import Request
 from litestar.datastructures import State
 from litestar.exceptions import ClientException, NotFoundException
 from litestar.params import Dependency
+from pydantic import BaseModel, ConfigDict, create_model
+from pydantic.alias_generators import to_pascal
 from sqlalchemy import Table, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.automap import AutomapBase
@@ -27,8 +29,8 @@ from sqlalchemy.orm import DeclarativeMeta
 from . import auth
 from .config import settings
 from .di import create_filter_dependencies
-from .models import AdvancedFilter, RegistryItem
-from .persistence import parse_comments, set_role
+from .models import AdvancedFilter
+from .persistence import parse_comments, pydantic_field_from_column, set_role
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -57,29 +59,77 @@ inflect.classical(names=0)
 # Litestar conversion starts here
 
 
-def create_controller(table_name: str, item: any) -> litestar.Controller:
-    """Dynamically create a Litestar Controller class for a given database table.
+def create_response_model(table: Table) -> type[BaseModel]:
+    """Dynamically create a Pydantic response model for a database table.
 
-    Introspects the ORM class corresponding to *table_name* and generates a
-    ``Controller`` sub-class with five HTTP handlers: ``GET /`` (list),
-    ``GET /{pk}`` (retrieve), ``POST /`` (create), ``PATCH /{pk}`` (update),
-    and ``DELETE /{pk}`` (delete).
+    Generates a class named ``{PascalSingularTableName}Model`` with one field
+    per column.  Nullability mirrors the column's ``nullable`` flag.
 
     Args:
-        table_name: The name of the database table (and URL path segment) for
-            which the controller is generated.
-        item: A registry entry object that exposes at least an ``item.model``
-            Pydantic model used for serialisation/deserialisation and an
-            ``item.get_input`` model used for field-level query parameters.
+        table: The SQLAlchemy ``Table`` whose columns drive the model fields.
+
+    Returns:
+        A Pydantic ``BaseModel`` subclass with ``from_attributes=True``,
+        suitable for validating ORM rows returned from the database.
+    """
+    return create_model(
+        to_pascal(f"{inflect.singular_noun(table.name)}_model"),
+        __config__=ConfigDict(from_attributes=True),
+        **{
+            name: pydantic_field_from_column(column, "model")
+            for name, column in table.columns.items()
+            if pydantic_field_from_column(column, "model")[0]
+        },
+    )
+
+
+def create_get_input_model(table: Table) -> type[BaseModel]:
+    """Dynamically create a Pydantic model for field-equality query parameters.
+
+    Generates a class named ``{PascalSingularTableName}GetInput`` with one
+    optional field per column, used to express ``WHERE field = value``
+    filters in the list endpoint's query string.
+
+    Args:
+        table: The SQLAlchemy ``Table`` whose columns drive the model fields.
+
+    Returns:
+        A Pydantic ``BaseModel`` subclass.
+    """
+    return create_model(
+        to_pascal(f"{inflect.singular_noun(table.name)}_get_input"),
+        __config__=ConfigDict(from_attributes=True),
+        **{
+            name: pydantic_field_from_column(column, "get_input")
+            for name, column in table.columns.items()
+            if pydantic_field_from_column(column, "get_input")[0]
+        },
+    )
+
+
+def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
+    """Dynamically create a Litestar Controller class for a given ORM class.
+
+    Generates a ``Controller`` sub-class with five HTTP handlers: ``GET /``
+    (list), ``GET /{pk}`` (retrieve), ``POST /`` (create), ``PATCH /{pk}``
+    (update), and ``DELETE /{pk}`` (delete).  Pydantic response and query
+    models are built on the fly from the ORM class's table — no external
+    registry is required.
+
+    Args:
+        orm_class: The SQLAlchemy automap-generated ORM class representing
+            the underlying table.
 
     Returns:
         A dynamically constructed :class:`litestar.Controller` subclass wired
         to the given table, ready to be mounted on a Litestar application.
     """
-    orm_class: DeclarativeMeta = Base.classes.get(table_name)
     table: Table = orm_class.__table__
+    table_name = table.name
     pkeys = table.primary_key.columns.keys()
     comment = parse_comments(table)
+    response_model = create_response_model(table)
+    get_input_model = create_get_input_model(table)
 
     class ItemController(litestar.Controller):
         """Auto-generated CRUD controller for a single database table.
@@ -93,7 +143,6 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
         path = f"{settings.base_path}/{table_name}"
         dependencies = create_filter_dependencies({"pagination_type": "limit_offset"})
         tags = [f"{table.name}: {comment.content if comment.content else ''}"]
-        get_input = models_registry[table_name].get_input
 
         @litestar.get(
             summary=f"List {table_name}",
@@ -106,9 +155,9 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
             request: Request[auth.User, str, State],
             filters: Annotated[list[filters.FilterTypes], Dependency(skip_validation=True)],
             # order_by: filters.OrderBy ,
-            condition: get_input | None = None,  # type: ignore
+            condition: get_input_model | None = None,  # type: ignore
             advanced_filter: AdvancedFilter | None = None,
-        ) -> list[item.model]:  # type: ignore
+        ) -> list[response_model]:  # type: ignore
             """Return a paginated, optionally filtered list of records.
 
             Applies limit/offset pagination from *filters*, field-equality
@@ -156,7 +205,7 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
                     _logger.error(f"Invalid filter: {e}")
                     raise ClientException(f"Invalid filter: {e}") from e
             results = (await session.execute(statement)).scalars().all()
-            return [item.model.model_validate(result) for result in results]
+            return [response_model.model_validate(result) for result in results]
 
         @litestar.get(
             path=f"/{'/'.join([f'{{{pk}:uuid}}' for pk in pkeys])}",
@@ -169,7 +218,7 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
             self,
             session: AsyncSession,
             request: litestar.Request,
-        ) -> item.model:  # type: ignore
+        ) -> response_model:  # type: ignore
             """Retrieve a single record by its primary key(s).
 
             Args:
@@ -190,14 +239,19 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
                 raise NotFoundException(
                     f"No {inflect.singular_noun(table_name)} with id(s) {request.path_params} found"
                 )
-            return item.model.model_validate(record)
+            return response_model.model_validate(record)
 
         @litestar.post(
             summary=f"Create a new {inflect.singular_noun(table_name)}",
             description=f"Create a new {inflect.singular_noun(table_name)}",
             security=[{"BearerToken": []}],
         )
-        async def create_item(self, session: AsyncSession, request: litestar.Request, data: item.model) -> item.model:  # type: ignore
+        async def create_item(
+            self,
+            session: AsyncSession,
+            request: litestar.Request,
+            data: response_model,  # type: ignore
+        ) -> response_model:  # type: ignore
             """Insert a new record into the database.
 
             Args:
@@ -230,8 +284,8 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
             self,
             session: AsyncSession,
             request: litestar.Request,
-            data: item.model,  # type: ignore
-        ) -> item.model:  # type: ignore
+            data: response_model,  # type: ignore
+        ) -> response_model:  # type: ignore
             """Partially update an existing record (PATCH semantics).
 
             Only fields that are explicitly set in *data* (i.e. present in the
@@ -301,30 +355,19 @@ def create_controller(table_name: str, item: any) -> litestar.Controller:
     return ItemController
 
 
-def build(_base: AutomapBase, _registry: dict[str, RegistryItem]) -> list[litestar.Controller]:
-    """Build and return a list of Litestar controllers for every registered table.
+def build(_base: AutomapBase) -> list[litestar.Controller]:
+    """Build and return a list of Litestar controllers for every reflected table.
 
-    Iterates over *_registry*, calls :func:`create_controller` for each entry,
-    and collects the resulting controller classes.  Also sets the module-level
-    ``Base`` and ``models_registry`` globals so that the dynamically defined
-    inner classes can reference them at class-body evaluation time.
+    Iterates over ``_base.classes`` and calls :func:`create_controller` for
+    each ORM class.  No external registry is required: response and query
+    Pydantic models are derived from each table at controller-creation time.
 
     Args:
         _base: The SQLAlchemy automap base whose ``.classes`` attribute maps
             table names to ORM classes.
-        _registry: A mapping of table name → model registry entry.  Each entry
-            must expose at minimum a ``model`` Pydantic class and a
-            ``get_input`` Pydantic class.
 
     Returns:
         A list of dynamically generated :class:`litestar.Controller` subclasses,
-        one per table in *_registry*.
+        one per table in ``_base.classes``.
     """
-    global Base, models_registry
-    Base = _base
-    models_registry = _registry
-    controllers: list[litestar.Controller] = []
-    for key, item in models_registry.items():
-        controller = create_controller(key, item)
-        controllers.append(controller)
-    return controllers
+    return [create_controller(orm_class) for orm_class in _base.classes]

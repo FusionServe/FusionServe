@@ -57,8 +57,10 @@ process will not come up without the database.
   Litestar lifespan from live PG introspection:
   - `persistence.introspect()` reflects the schema via a **sync** psycopg
     engine (SQLAlchemy reflection requires sync), then hands the automap
-    `Base` to `rest.build_controllers` and `graphql.build`. Runtime queries
-    use the async asyncpg engine. Both dialects must work.
+    `Base` to `rest.build` and `graphql.build` — both functions iterate
+    `Base.classes` and derive every type they need from each ORM class's
+    `__table__`; there is no shared registry. Runtime queries use the async
+    asyncpg engine. Both dialects must work.
   - `introspect()` **rejects any table whose name is not plural** (checked
     with `inflect.singular_noun`). Adding a singularly-named table will
     crash startup with `ValueError: Table name X is not plural`.
@@ -106,8 +108,8 @@ process will not come up without the database.
   are writing the first real test of that area — don't expect helpers.
 - `pytest` runs without a database because nothing in the test suite imports
   `main` (which triggers introspection). If you add tests that touch `main`,
-  `rest.build_controllers`, or `graphql.build`, you will need to stand up a
-  PG instance or mock the introspection boundary.
+  `rest.build`, or `graphql.build`, you will need to stand up a PG instance
+  or mock the introspection boundary.
 
 ## Docs
 

@@ -148,13 +148,6 @@ COMPARISON_TYPE_MAP: dict[type, type] = {
 }
 
 
-class RegistryItem(BaseModel):
-    model: Any = None
-    get_input: Any = None
-    create_input: Any = None
-    pk_input: Any = None
-
-
 # TODO: review validation pattern
 pattern = r"^\(?\s*([a-zA-Z_]+)\s+(eq|ne|gt|ge|lt|le)\s+"
 pattern += r"('[^']*'|\d+(\.\d+)?)\s*(\s+(and|or)\s+"

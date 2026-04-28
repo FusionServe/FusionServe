@@ -4,16 +4,15 @@ from typing import Any, Literal
 
 import inflect as _inflect
 import yaml
-from pydantic import ConfigDict, Field, create_model
-from pydantic.alias_generators import to_pascal
+from pydantic import Field
 from sqlalchemy import DDL, Column, MetaData, Select, Table, create_engine, func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.ext.automap import automap_base
+from sqlalchemy.ext.automap import AutomapBase, automap_base
 from sqlalchemy.orm import DeclarativeMeta, load_only
 
 from .auth import User
 from .config import settings
-from .models import RegistryItem, SmartComment
+from .models import SmartComment
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -51,8 +50,25 @@ inflect.classical(names=0)
 
 def pydantic_field_from_column(
     column: Column,
-    model_type: Literal["model", "get_input", "create_input", "pk_input"],
+    model_type: Literal["model", "get_input"],
 ) -> tuple[Any, Field]:
+    """Build a ``(type, Field)`` tuple for a Pydantic ``create_model`` call.
+
+    The mapping from SQLAlchemy column to Pydantic field type depends on the
+    role the generated model will play:
+
+    * ``"model"`` — response payload: nullability mirrors the column's
+      ``nullable`` flag.
+    * ``"get_input"`` — query-string filter input: every field is optional.
+
+    Args:
+        column: The SQLAlchemy column to translate.
+        model_type: Which Pydantic model variant the field will live in.
+
+    Returns:
+        A ``(field_type, Field)`` tuple suitable for splatting into
+        :func:`pydantic.create_model`.
+    """
     try:
         python_type = column.type.python_type
     except NotImplementedError:
@@ -60,13 +76,24 @@ def pydantic_field_from_column(
     field_type = {
         "model": python_type | None if column.nullable else python_type,
         "get_input": python_type | None,
-        "create_input": python_type | None if not column.primary_key else python_type,
-        "pk_input": python_type if column.primary_key else None,
     }[model_type]
     return (field_type, Field(None, description=column.comment))
 
 
-def introspect():
+def introspect() -> AutomapBase:
+    """Reflect the configured PostgreSQL schema and return an automap ``Base``.
+
+    Uses a synchronous psycopg engine because SQLAlchemy reflection requires
+    a sync dialect.  Also installs the ``current_user_id()`` SQL function in
+    the configured app schema (idempotently, on every startup).
+
+    Returns:
+        The SQLAlchemy automap ``Base`` whose ``.classes`` attribute maps
+        plural table names to ORM classes.
+
+    Raises:
+        ValueError: If any reflected table has a non-plural name.
+    """
     # Introspection is only supported for sync engines
     _engine = create_engine(
         f"postgresql+psycopg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
@@ -80,30 +107,13 @@ def introspect():
         connection.execute(current_user_id_ddl)
     metadata = MetaData()
     metadata.reflect(bind=_engine, schema=settings.pg_app_schema)
-    models_registry: dict[str, RegistryItem] = {}
     Base = automap_base(metadata=metadata)
     # calling prepare() just sets up mapped classes and relationships.
     Base.prepare()
     for table in metadata.sorted_tables:
         if not inflect.singular_noun(table.name):
             raise ValueError(f"Table name {table.name} is not plural")
-        item = RegistryItem()
-        for model_type in RegistryItem.model_fields:
-            setattr(
-                item,
-                model_type,
-                create_model(
-                    to_pascal(f"{inflect.singular_noun(table.name)}_{model_type}"),
-                    __config__=ConfigDict(from_attributes=True),
-                    **{
-                        k: pydantic_field_from_column(v, model_type)
-                        for k, v in table.columns.items()
-                        if pydantic_field_from_column(v, model_type)[0]
-                    },
-                ),
-            )
-        models_registry[table.name] = item
-    return Base, models_registry
+    return Base
 
 
 async def set_role(session: AsyncSession, user: User | None):
