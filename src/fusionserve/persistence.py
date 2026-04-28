@@ -50,7 +50,7 @@ inflect.classical(names=0)
 
 def pydantic_field_from_column(
     column: Column,
-    model_type: Literal["model", "get_input"],
+    model_type: Literal["model", "get_input", "create_input"],
 ) -> tuple[Any, Field]:
     """Build a ``(type, Field)`` tuple for a Pydantic ``create_model`` call.
 
@@ -60,6 +60,9 @@ def pydantic_field_from_column(
     * ``"model"`` — response payload: nullability mirrors the column's
       ``nullable`` flag.
     * ``"get_input"`` — query-string filter input: every field is optional.
+    * ``"create_input"`` — POST request body for record creation: required
+      and non-nullable when the column has neither a server default nor a
+      Python-side default and is not nullable; optional otherwise.
 
     Args:
         column: The SQLAlchemy column to translate.
@@ -73,11 +76,23 @@ def pydantic_field_from_column(
         python_type = column.type.python_type
     except NotImplementedError:
         python_type = str
-    field_type = {
-        "model": python_type | None if column.nullable else python_type,
-        "get_input": python_type | None,
-    }[model_type]
-    return (field_type, Field(None, description=column.comment))
+    has_default = column.server_default is not None or column.default is not None
+    if model_type == "model":
+        field_type = python_type | None if column.nullable else python_type
+        default = None
+    elif model_type == "get_input":
+        field_type = python_type | None
+        default = None
+    elif model_type == "create_input":
+        if column.nullable or has_default:
+            field_type = python_type | None
+            default = None
+        else:
+            field_type = python_type
+            default = ...  # required
+    else:
+        raise ValueError(f"Unknown model_type {model_type!r}")
+    return (field_type, Field(default, description=column.comment))
 
 
 def introspect() -> AutomapBase:
@@ -137,7 +152,7 @@ async def set_role(session: AsyncSession, user: User | None):
             func.set_config("user.first_name", user.first_name or "", True),
             func.set_config("user.surname", user.surname or "", True),
         )
-    _logger.debug(f"Setting role to {role}")
+    _logger.debug("Setting role to %s", role)
     await session.execute(statement)
     # select set_config('role', 'app_user', true), set_config('user_id', '2', true), ...
 

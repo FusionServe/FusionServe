@@ -161,7 +161,7 @@ class AdvancedFilter(BaseModel):
         None,
         alias="_filter",
         description="advanced **filter** on multiple fields using expressions",
-        examples="(author eq 'Kafka' or name eq 'Mike') and price lt 2.55",
+        examples=["(author eq 'Kafka' or name eq 'Mike') and price lt 2.55"],
         pattern=pattern,
     )
 

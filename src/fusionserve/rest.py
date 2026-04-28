@@ -107,6 +107,32 @@ def create_get_input_model(table: Table) -> type[BaseModel]:
     )
 
 
+def create_create_input_model(table: Table) -> type[BaseModel]:
+    """Dynamically create a Pydantic model for ``POST`` request bodies.
+
+    Generates a class named ``{PascalSingularTableName}CreateInput``. Columns
+    with either a server-side default (``server_default``) or a Python-side
+    default (``default``) become optional, so clients are not forced to
+    provide values for surrogate keys, ``created_at`` timestamps, etc.
+    Non-nullable columns without a default remain required.
+
+    Args:
+        table: The SQLAlchemy ``Table`` whose columns drive the model fields.
+
+    Returns:
+        A Pydantic ``BaseModel`` subclass.
+    """
+    return create_model(
+        to_pascal(f"{inflect.singular_noun(table.name)}_create_input"),
+        __config__=ConfigDict(from_attributes=True),
+        **{
+            name: pydantic_field_from_column(column, "create_input")
+            for name, column in table.columns.items()
+            if pydantic_field_from_column(column, "create_input")[0]
+        },
+    )
+
+
 def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
     """Dynamically create a Litestar Controller class for a given ORM class.
 
@@ -130,6 +156,7 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
     comment = parse_comments(table)
     response_model = create_response_model(table)
     get_input_model = create_get_input_model(table)
+    create_input_model = create_create_input_model(table)
 
     class ItemController(litestar.Controller):
         """Auto-generated CRUD controller for a single database table.
@@ -141,7 +168,12 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
         """
 
         path = f"{settings.base_path}/{table_name}"
-        dependencies = create_filter_dependencies({"pagination_type": "limit_offset"})
+        dependencies = create_filter_dependencies(
+            {
+                "pagination_type": "limit_offset",
+                "pagination_size": settings.default_page_size,
+            }
+        )
         tags = [f"{table.name}: {comment.content if comment.content else ''}"]
 
         @litestar.get(
@@ -186,7 +218,10 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
             # raise 403 if the user is not authorized
             # TODO: what about exc?
             await set_role(session, request.user)
-            statement = filters[0].append_to_statement(select(orm_class), orm_class)
+            limit_offset = filters[0]
+            if limit_offset.limit > settings.max_page_length:
+                raise ClientException(f"limit {limit_offset.limit} exceeds max_page_length {settings.max_page_length}")
+            statement = limit_offset.append_to_statement(select(orm_class), orm_class)
             # statement = select(orm_class)
             if condition:
                 for k in condition.model_fields:
@@ -202,7 +237,7 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
                     odata_query.exceptions.ParsingException,
                 ) as e:
                     # TODO: standardize error responses as the best practises
-                    _logger.error(f"Invalid filter: {e}")
+                    _logger.error("Invalid filter: %s", e)
                     raise ClientException(f"Invalid filter: {e}") from e
             results = (await session.execute(statement)).scalars().all()
             return [response_model.model_validate(result) for result in results]
@@ -250,7 +285,7 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
             self,
             session: AsyncSession,
             request: litestar.Request,
-            data: response_model,  # type: ignore
+            data: create_input_model,  # type: ignore
         ) -> response_model:  # type: ignore
             """Insert a new record into the database.
 

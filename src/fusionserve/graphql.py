@@ -41,8 +41,6 @@ _logger = logging.getLogger(settings.app_name)
 inflect = _inflect.engine()
 inflect.classical(names=0)
 
-_mapper = StrawberrySQLAlchemyMapper(always_use_list=True)
-
 Item = TypeVar("Item")
 
 # Maximum recursion depth for nested where clauses to prevent abuse.
@@ -146,26 +144,21 @@ class UserType:
     pass
 
 
-class Query:
-    """Root GraphQL query type.
+def _set_resolver_arguments(field, arguments: list[StrawberryArgument]) -> None:
+    """Replace a Strawberry field's resolver argument list in place.
 
-    Fields are dynamically added at startup by :func:`build` for each
-    registered database table.
+    Strawberry derives a resolver's GraphQL arguments from its Python
+    signature. When the argument types are dynamically generated per table
+    (e.g. ``UsersWhere``), the simplest reliable hook is to reassign
+    ``base_resolver.arguments`` after the field has been constructed. This
+    helper centralises that pattern so call sites are easy to spot.
+
+    Args:
+        field: The Strawberry field returned by ``strawberry.field`` or
+            ``strawberry.mutation``.
+        arguments: The new argument list to install.
     """
-
-    @strawberry.field
-    def current_user(self, info: strawberry.Info[CustomHTTPContextType, None]) -> UserType | None:
-        return info.context.request.user or None
-
-
-class Mutation:
-    """Root GraphQL mutation type.
-
-    Fields are dynamically added at startup by :func:`build` for each
-    registered database table.
-    """
-
-    pass
+    field.base_resolver.arguments = arguments
 
 
 def columns_from_selections(
@@ -280,7 +273,7 @@ def create_where_input(table: Table) -> type:
     return strawberry.input(cls)
 
 
-def create_input_type(table: Table) -> type:
+def create_input_type(table: Table, mapper: StrawberrySQLAlchemyMapper) -> type:
     """Dynamically create a Strawberry input type for creating a new record.
 
     Generates a class named ``{PascalTableName}Input`` with one optional
@@ -290,7 +283,8 @@ def create_input_type(table: Table) -> type:
 
     Args:
         table: The SQLAlchemy ``Table`` whose columns drive the input fields.
-        gql_type: The corresponding Strawberry GraphQL type for the table.
+        mapper: The ``StrawberrySQLAlchemyMapper`` used to translate
+            SQLAlchemy column types to Strawberry-compatible Python types.
 
     Returns:
         A Strawberry ``@input``-decorated class.
@@ -299,7 +293,7 @@ def create_input_type(table: Table) -> type:
     defaults: dict[str, object] = {}
     for column in table.columns:
         try:
-            column_type = _mapper._convert_column_to_strawberry_type(column)
+            column_type = mapper._convert_column_to_strawberry_type(column)
         except NotImplementedError:
             column_type = str
         annotations[column.name] = column_type
@@ -312,7 +306,7 @@ def create_input_type(table: Table) -> type:
     return strawberry.input(cls)
 
 
-def patch_input_type(table: Table) -> type:
+def patch_input_type(table: Table, mapper: StrawberrySQLAlchemyMapper) -> type:
     """Dynamically create a Strawberry input type for patching an existing record.
 
     Generates a class named ``{PascalTableName}Patch`` with one optional
@@ -323,6 +317,8 @@ def patch_input_type(table: Table) -> type:
 
     Args:
         table: The SQLAlchemy ``Table`` whose columns drive the input fields.
+        mapper: The ``StrawberrySQLAlchemyMapper`` used to translate
+            SQLAlchemy column types to Strawberry-compatible Python types.
 
     Returns:
         A Strawberry ``@input``-decorated class.
@@ -334,7 +330,7 @@ def patch_input_type(table: Table) -> type:
         if column.name in pk_names:
             continue
         try:
-            column_type = _mapper._convert_column_to_strawberry_type(column)
+            column_type = mapper._convert_column_to_strawberry_type(column)
         except NotImplementedError:
             column_type = str
         annotations[column.name] = column_type | None
@@ -463,30 +459,30 @@ def resolver_factory(
     orm_class: DeclarativeMeta,
     gql_type,
     resolver_type: ResolverType,
+    mapper: StrawberrySQLAlchemyMapper,
 ):
     """Create a Strawberry resolver function for a given table and resolver type.
 
-    Returns either a paginated list resolver or a primary-key lookup resolver
-    depending on ``resolver_type``. Both resolvers apply column-level load
-    optimisation based on the GraphQL selection set and execute queries in
-    an independent async session with the configured anonymous role.
+    Returns one of the eight resolver flavours (``LIST``, ``PK``, ``CREATE``,
+    ``CREATE_MANY``, ``UPDATE``, ``UPDATE_MANY``, ``DELETE``, ``DELETE_MANY``).
+    All resolvers open an independent async session and apply the request's
+    PostgreSQL role before executing.
 
     Args:
         orm_class: The SQLAlchemy ORM class representing the underlying table.
         gql_type: The Strawberry GraphQL type mapped from the ORM class.
-        resolver_type: Whether to create a ``LIST`` or ``PK`` resolver.
-        order_by_type: The dynamically generated Strawberry input type for
-            ordering (only used by ``LIST`` resolvers).
-        where_type: The dynamically generated Strawberry input type for
-            filtering (only used by ``LIST`` resolvers).
+        resolver_type: Which resolver flavour to build.
+        mapper: The ``StrawberrySQLAlchemyMapper`` instance used to derive
+            create/patch input types.
+
     Returns:
         An async resolver function suitable for
-        ``strawberry.field(resolver=...)``.
+        ``strawberry.field(resolver=...)`` or ``strawberry.mutation(...)``.
     """
 
     async def list_resolver(
         info: strawberry.Info[CustomHTTPContextType, None],
-        limit: int = settings.max_page_length,
+        limit: int = settings.default_page_size,
         offset: int = 0,
         order_by: create_order_by_input(orm_class.__table__) | None = None,  # type: ignore
         where: create_where_input(orm_class.__table__) | None = None,  # type: ignore
@@ -496,8 +492,10 @@ def resolver_factory(
         Args:
             info: The Strawberry resolver info containing the selection set
                 and custom context.
-            limit: Maximum number of records to return.
+            limit: Maximum number of records to return. Must be a positive
+                integer no greater than ``settings.max_page_length``.
             offset: Number of records to skip before returning results.
+                Must be non-negative.
             order_by: Optional per-column ordering input (dynamically typed
                 per table).
             where: Optional per-column filter input with boolean combinators
@@ -506,7 +504,16 @@ def resolver_factory(
         Returns:
             A ``PaginationWindow`` containing the matching nodes and
             total count.
+
+        Raises:
+            ValueError: If ``limit`` or ``offset`` are out of bounds.
         """
+        if limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        if limit > settings.max_page_length:
+            raise ValueError(f"limit {limit} exceeds max_page_length {settings.max_page_length}")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
         statement = select(orm_class, func.count().over().label("total_count"))
         if where is not None:
             condition = apply_where(orm_class, where)
@@ -563,7 +570,7 @@ def resolver_factory(
 
     async def create_resolver(
         info: strawberry.Info[CustomHTTPContextType, None],
-        input: create_input_type(orm_class.__table__),  # type: ignore
+        input: create_input_type(orm_class.__table__, mapper),  # type: ignore
     ) -> gql_type:  # type: ignore
         """Create a new record with the given field values.
 
@@ -585,7 +592,7 @@ def resolver_factory(
 
     async def create_many_resolver(
         info: strawberry.Info[CustomHTTPContextType, None],
-        inputs: list[create_input_type(orm_class.__table__)],  # type: ignore
+        inputs: list[create_input_type(orm_class.__table__, mapper)],  # type: ignore
     ) -> list[gql_type]:  # type: ignore
         """Insert many records in a single statement.
 
@@ -620,7 +627,7 @@ def resolver_factory(
 
     async def update_resolver(
         info: strawberry.Info[CustomHTTPContextType, None],
-        patch: patch_input_type(orm_class.__table__),  # type: ignore
+        patch: patch_input_type(orm_class.__table__, mapper),  # type: ignore
         **kwids: object,
     ) -> gql_type:  # type: ignore
         """Update an existing record with the given field values.
@@ -657,7 +664,7 @@ def resolver_factory(
 
     async def update_many_resolver(
         info: strawberry.Info[CustomHTTPContextType, None],
-        patch: patch_input_type(orm_class.__table__),  # type: ignore
+        patch: patch_input_type(orm_class.__table__, mapper),  # type: ignore
         where: create_where_input(orm_class.__table__),  # type: ignore
     ) -> list[gql_type]:  # type: ignore
         """Apply the same patch to every row matching a where condition.
@@ -788,10 +795,10 @@ def resolver_factory(
 def build(_base: AutomapBase):
     """Build a Strawberry GraphQL schema and Litestar controller from reflected tables.
 
-    Iterates over the model registry, creates Strawberry types via
-    ``StrawberrySQLAlchemyMapper``, and registers a paginated list query
-    field and a primary-key lookup query field for each table on the
-    root ``Query`` type.
+    Each invocation produces an isolated ``StrawberrySQLAlchemyMapper`` plus
+    fresh ``Query`` and ``Mutation`` skeletons, so the function is safe to
+    call repeatedly (test reload, dev hot-reload, multiple Litestar apps in
+    the same process).
 
     Args:
         _base: The SQLAlchemy automap base whose ``.classes`` attribute
@@ -801,188 +808,217 @@ def build(_base: AutomapBase):
         A Litestar-compatible GraphQL controller ready to be mounted
         on the application.
     """
+    mapper = StrawberrySQLAlchemyMapper(always_use_list=True)
+
+    class Query:
+        """Root GraphQL query type for this build.
+
+        Fields are populated below as the loop walks ``_base.classes``.
+        """
+
+        @strawberry.field
+        def current_user(self, info: strawberry.Info[CustomHTTPContextType, None]) -> UserType | None:
+            return info.context.request.user or None
+
+    class Mutation:
+        """Root GraphQL mutation type for this build."""
 
     for orm_class in _base.classes:
         table: Table = orm_class.__table__
         pks = table.primary_key.columns.keys()
-        gql_type = _mapper.type(orm_class)(type(table.name, (object,), {}))
+        gql_type = mapper.type(orm_class)(type(table.name, (object,), {}))
+        # ---- Query: list ----
         setattr(
             Query,
             table.name,
             strawberry.field(
-                resolver=resolver_factory(
-                    orm_class,
-                    gql_type,
-                    ResolverType.LIST,
-                ),
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.LIST, mapper),
                 description=f"List {table.name} with pagination, filtering and ordering.",
             ),
         )
-        # dynamic order_by and where arguments for list resolver
         list_field = getattr(Query, table.name)
-        list_field.base_resolver.arguments = [
-            arg for arg in list_field.base_resolver.arguments if arg.python_name not in ("order_by", "where")
-        ] + [
-            StrawberryArgument(
-                "order_by",
-                "order_by",
-                StrawberryAnnotation(create_order_by_input(orm_class.__table__) | None),  # type: ignore
-                default=strawberry.UNSET,
-            ),
-            StrawberryArgument(
-                "where",
-                "where",
-                StrawberryAnnotation(create_where_input(orm_class.__table__) | None),  # type: ignore
-                default=strawberry.UNSET,
-            ),
-        ]
+        _set_resolver_arguments(
+            list_field,
+            [arg for arg in list_field.base_resolver.arguments if arg.python_name not in ("order_by", "where")]
+            + [
+                StrawberryArgument(
+                    "order_by",
+                    "order_by",
+                    StrawberryAnnotation(create_order_by_input(orm_class.__table__) | None),  # type: ignore
+                    default=strawberry.UNSET,
+                ),
+                StrawberryArgument(
+                    "where",
+                    "where",
+                    StrawberryAnnotation(create_where_input(orm_class.__table__) | None),  # type: ignore
+                    default=strawberry.UNSET,
+                ),
+            ],
+        )
+        # ---- Query: pk ----
+        pk_field_name = inflect.singular_noun(table.name)
         setattr(
             Query,
-            inflect.singular_noun(table.name),
+            pk_field_name,
             strawberry.field(
-                resolver=resolver_factory(orm_class, gql_type, ResolverType.PK),
-                description=f"Get a {inflect.singular_noun(table.name)} by primary key.",
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.PK, mapper),
+                description=f"Get a {pk_field_name} by primary key.",
             ),
         )
-        # dynamic pk arguments
-        getattr(Query, inflect.singular_noun(table.name)).base_resolver.arguments = [
-            StrawberryArgument(
-                pk, pk, StrawberryAnnotation(_mapper._convert_column_to_strawberry_type(table.primary_key.columns[pk]))
-            )
-            for pk in pks
-        ]
-        setattr(
-            Mutation,
-            f"create{to_pascal(inflect.singular_noun(table.name))}",
-            strawberry.mutation(
-                resolver=resolver_factory(orm_class, gql_type, ResolverType.CREATE),
-                description=f"Create a new {inflect.singular_noun(table.name)}.",
-            ),
-        )
-        # dynamic arguments
-        """getattr(Mutation, inflect.singular_noun(table.name)).base_resolver.arguments = [
-            StrawberryArgument(
-                col, col, StrawberryAnnotation(mapper._convert_column_to_strawberry_type(table.columns[col]))
-            )
-            for col in cols
-        ]"""
-        getattr(Mutation, f"create{to_pascal(inflect.singular_noun(table.name))}").base_resolver.arguments = [
-            StrawberryArgument("input", "input", StrawberryAnnotation(create_input_type(orm_class.__table__)))
-        ]
-        setattr(
-            Mutation,
-            f"create{to_pascal(table.name)}",
-            strawberry.mutation(
-                resolver=resolver_factory(orm_class, gql_type, ResolverType.CREATE_MANY),
-                description=f"Create many {table.name} rows in a single statement.",
-            ),
-        )
-        # dynamic inputs argument for create_many mutation
-        getattr(Mutation, f"create{to_pascal(table.name)}").base_resolver.arguments = [
-            StrawberryArgument(
-                "inputs",
-                "inputs",
-                StrawberryAnnotation(list[create_input_type(orm_class.__table__)]),  # type: ignore
-            ),
-        ]
-        setattr(
-            Mutation,
-            f"update{to_pascal(inflect.singular_noun(table.name))}",
-            strawberry.mutation(
-                resolver=resolver_factory(orm_class, gql_type, ResolverType.UPDATE),
-                description=f"Update an existing {inflect.singular_noun(table.name)} by primary key.",
-            ),
-        )
-        # dynamic patch + pk arguments for update mutation
-        getattr(Mutation, f"update{to_pascal(inflect.singular_noun(table.name))}").base_resolver.arguments = [
-            StrawberryArgument(
-                "patch",
-                "patch",
-                StrawberryAnnotation(patch_input_type(orm_class.__table__)),
-            ),
-            *[
+        _set_resolver_arguments(
+            getattr(Query, pk_field_name),
+            [
                 StrawberryArgument(
                     pk,
                     pk,
-                    StrawberryAnnotation(_mapper._convert_column_to_strawberry_type(table.primary_key.columns[pk])),
+                    StrawberryAnnotation(mapper._convert_column_to_strawberry_type(table.primary_key.columns[pk])),
                 )
                 for pk in pks
             ],
-        ]
+        )
+        # ---- Mutation: create one ----
+        create_one = f"create{to_pascal(pk_field_name)}"
         setattr(
             Mutation,
-            f"update{to_pascal(table.name)}",
+            create_one,
             strawberry.mutation(
-                resolver=resolver_factory(
-                    orm_class,
-                    gql_type,
-                    ResolverType.UPDATE_MANY,
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.CREATE, mapper),
+                description=f"Create a new {pk_field_name}.",
+            ),
+        )
+        _set_resolver_arguments(
+            getattr(Mutation, create_one),
+            [
+                StrawberryArgument(
+                    "input",
+                    "input",
+                    StrawberryAnnotation(create_input_type(orm_class.__table__, mapper)),
+                )
+            ],
+        )
+        # ---- Mutation: create many ----
+        create_many = f"create{to_pascal(table.name)}"
+        setattr(
+            Mutation,
+            create_many,
+            strawberry.mutation(
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.CREATE_MANY, mapper),
+                description=f"Create many {table.name} rows in a single statement.",
+            ),
+        )
+        _set_resolver_arguments(
+            getattr(Mutation, create_many),
+            [
+                StrawberryArgument(
+                    "inputs",
+                    "inputs",
+                    StrawberryAnnotation(list[create_input_type(orm_class.__table__, mapper)]),  # type: ignore
                 ),
+            ],
+        )
+        # ---- Mutation: update by pk ----
+        update_one = f"update{to_pascal(pk_field_name)}"
+        setattr(
+            Mutation,
+            update_one,
+            strawberry.mutation(
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.UPDATE, mapper),
+                description=f"Update an existing {pk_field_name} by primary key.",
+            ),
+        )
+        _set_resolver_arguments(
+            getattr(Mutation, update_one),
+            [
+                StrawberryArgument(
+                    "patch",
+                    "patch",
+                    StrawberryAnnotation(patch_input_type(orm_class.__table__, mapper)),
+                ),
+                *[
+                    StrawberryArgument(
+                        pk,
+                        pk,
+                        StrawberryAnnotation(mapper._convert_column_to_strawberry_type(table.primary_key.columns[pk])),
+                    )
+                    for pk in pks
+                ],
+            ],
+        )
+        # ---- Mutation: update many ----
+        update_many = f"update{to_pascal(table.name)}"
+        setattr(
+            Mutation,
+            update_many,
+            strawberry.mutation(
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.UPDATE_MANY, mapper),
                 description=f"Update every {table.name} row matching the given where condition with the same patch.",
             ),
         )
-        # dynamic patch + where arguments for update_many mutation
-        getattr(Mutation, f"update{to_pascal(table.name)}").base_resolver.arguments = [
-            StrawberryArgument(
-                "patch",
-                "patch",
-                StrawberryAnnotation(patch_input_type(orm_class.__table__)),
-            ),
-            StrawberryArgument(
-                "where",
-                "where",
-                StrawberryAnnotation(create_where_input(orm_class.__table__)),  # type: ignore
-            ),
-        ]
+        _set_resolver_arguments(
+            getattr(Mutation, update_many),
+            [
+                StrawberryArgument(
+                    "patch",
+                    "patch",
+                    StrawberryAnnotation(patch_input_type(orm_class.__table__, mapper)),
+                ),
+                StrawberryArgument(
+                    "where",
+                    "where",
+                    StrawberryAnnotation(create_where_input(orm_class.__table__)),  # type: ignore
+                ),
+            ],
+        )
+        # ---- Mutation: delete by pk ----
+        delete_one = f"delete{to_pascal(pk_field_name)}"
         setattr(
             Mutation,
-            f"delete{to_pascal(inflect.singular_noun(table.name))}",
+            delete_one,
             strawberry.mutation(
-                resolver=resolver_factory(orm_class, gql_type, ResolverType.DELETE),
-                description=f"Delete an existing {inflect.singular_noun(table.name)} by primary key.",
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.DELETE, mapper),
+                description=f"Delete an existing {pk_field_name} by primary key.",
             ),
         )
-        # dynamic pk arguments for delete mutation
-        getattr(Mutation, f"delete{to_pascal(inflect.singular_noun(table.name))}").base_resolver.arguments = [
-            StrawberryArgument(
-                pk,
-                pk,
-                StrawberryAnnotation(_mapper._convert_column_to_strawberry_type(table.primary_key.columns[pk])),
-            )
-            for pk in pks
-        ]
+        _set_resolver_arguments(
+            getattr(Mutation, delete_one),
+            [
+                StrawberryArgument(
+                    pk,
+                    pk,
+                    StrawberryAnnotation(mapper._convert_column_to_strawberry_type(table.primary_key.columns[pk])),
+                )
+                for pk in pks
+            ],
+        )
+        # ---- Mutation: delete many ----
+        delete_many = f"delete{to_pascal(table.name)}"
         setattr(
             Mutation,
-            f"delete{to_pascal(table.name)}",
+            delete_many,
             strawberry.mutation(
-                resolver=resolver_factory(
-                    orm_class,
-                    gql_type,
-                    ResolverType.DELETE_MANY,
-                ),
+                resolver=resolver_factory(orm_class, gql_type, ResolverType.DELETE_MANY, mapper),
                 description=f"Delete every {table.name} row matching the given where condition.",
             ),
         )
-        # dynamic where argument for delete_many mutation
-        getattr(Mutation, f"delete{to_pascal(table.name)}").base_resolver.arguments = [
-            StrawberryArgument(
-                "where",
-                "where",
-                StrawberryAnnotation(create_where_input(orm_class.__table__)),  # type: ignore
-            ),
-        ]
+        _set_resolver_arguments(
+            getattr(Mutation, delete_many),
+            [
+                StrawberryArgument(
+                    "where",
+                    "where",
+                    StrawberryAnnotation(create_where_input(orm_class.__table__)),  # type: ignore
+                ),
+            ],
+        )
 
-    # models that are related to models that are in the schema
-    # are automatically mapped at this stage
-    _mapper.finalize()
+    # Models related to models in the schema are automatically mapped here.
+    mapper.finalize()
     schema = strawberry.Schema(
         query=strawberry.type(Query),
         mutation=strawberry.type(Mutation),
         extensions=[
             QueryDepthLimiter(max_depth=10),
         ],
-        #  only needed if you have polymorphic types
-        # types=mapper.mapped_types.values(),
     )
     controller = make_graphql_controller(
         schema,
