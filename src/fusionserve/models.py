@@ -167,7 +167,7 @@ class AdvancedFilter(BaseModel):
 
 
 class PaginationParams(BaseModel):
-    limit: int = Field(100, alias="__limit", gt=0, le=settings.max_page_length)
+    limit: int = Field(100, alias="__limit", gt=0, le=settings.max_page_size)
     offset: int = Field(0, alias="__offset", ge=0)
     order_by: str | None = Field(None, alias="__order_by")
 

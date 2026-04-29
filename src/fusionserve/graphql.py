@@ -489,7 +489,7 @@ def resolver_factory(
             info: The Strawberry resolver info containing the selection set
                 and custom context.
             limit: Maximum number of records to return. Must be a positive
-                integer no greater than ``settings.max_page_length``.
+                integer no greater than ``settings.max_page_size``.
             offset: Number of records to skip before returning results.
                 Must be non-negative.
             order_by: Optional per-column ordering input (dynamically typed
@@ -506,8 +506,8 @@ def resolver_factory(
         """
         if limit <= 0:
             raise ValueError("limit must be a positive integer")
-        if limit > settings.max_page_length:
-            raise ValueError(f"limit {limit} exceeds max_page_length {settings.max_page_length}")
+        if limit > settings.max_page_size:
+            raise ValueError(f"limit {limit} exceeds max_page_size {settings.max_page_size}")
         if offset < 0:
             raise ValueError("offset must be non-negative")
         statement = select(orm_class, func.count().over().label("total_count"))

@@ -122,14 +122,11 @@ def introspect() -> AutomapBase:
         echo=settings.echo_sql,
         pool_pre_ping=True,
     )
-    try:
-        with _engine.begin() as connection:
-            _logger.debug("Running DDL to create current_user_id() function")
-            connection.execute(current_user_id_ddl)
-        metadata = MetaData()
-        metadata.reflect(bind=_engine, schema=settings.pg_app_schema)
-    finally:
-        _engine.dispose()
+    with _engine.begin() as connection:
+        _logger.debug("Running DDL to create current_user_id() function")
+        connection.execute(current_user_id_ddl)
+    metadata = MetaData()
+    metadata.reflect(bind=_engine, schema=settings.pg_app_schema)
 
     Base = automap_base(metadata=metadata)
     # calling prepare() just sets up mapped classes and relationships.

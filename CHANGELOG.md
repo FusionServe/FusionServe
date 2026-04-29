@@ -44,10 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- REST list resolvers reject `_limit` greater than `settings.max_page_length`
+- REST list resolvers reject `_limit` greater than `settings.max_page_size`
   with a 400, instead of silently honouring arbitrarily large pages.
 - GraphQL list resolvers reject `limit <= 0`, `offset < 0`, and
-  `limit > settings.max_page_length` with a typed error. Default `limit`
+  `limit > settings.max_page_size` with a typed error. Default `limit`
   is now `settings.default_page_size`.
 - `models.AdvancedFilter.examples` is now a list (Pydantic 2 expects a
   sequence; the previous string value was silently converted).

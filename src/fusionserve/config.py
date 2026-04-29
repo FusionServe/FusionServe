@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     pg_port: int = 5432
     echo_sql: bool = False
     default_page_size: int = 50
-    max_page_length: int = 1000
+    max_page_size: int = 1000
     anonymous_role: str = "fusionserve"
     debug: bool = False
     base_path: str = "/api"

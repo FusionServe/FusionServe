@@ -15,7 +15,7 @@ from litestar.plugins.prometheus import PrometheusConfig, PrometheusController
 
 from . import auth, graphql, rest
 from .config import settings
-from .persistence import engine, get_async_session, introspect
+from .persistence import get_async_session, introspect
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -34,13 +34,7 @@ async def lifespan(app: Litestar):
     for controller in rest.build(Base):
         app.register(controller)
     app.register(graphql.build(Base))
-    try:
-        yield
-    finally:
-        # ---- shutdown ----
-        # Cleanly close the async engine's connection pool. SQLAlchemy logs a
-        # warning at interpreter exit if this is skipped.
-        await engine.dispose()
+    yield
 
 
 class AuthMiddleware(AbstractAuthenticationMiddleware):

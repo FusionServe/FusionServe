@@ -72,7 +72,7 @@ Every auto-generated resolver accepts the following arguments:
 
 | Argument | Type | Default | Description |
 |---|---|---|---|
-| `limit` | `Int` | `max_page_length` | Maximum records to return |
+| `limit` | `Int` | `max_page_size` | Maximum records to return |
 | `offset` | `Int` | `0` | Records to skip |
 | `order_by` | `String` | `null` | Column name to sort by |
 

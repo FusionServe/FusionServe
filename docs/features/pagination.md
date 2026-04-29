@@ -27,11 +27,11 @@ Returns records 21–30 (zero-indexed).
 
 ## Maximum Page Size
 
-The server-side maximum is controlled by the `max_page_length` configuration setting (default `1000`).  Requests that specify a `_limit` value above this ceiling are rejected with a validation error.
+The server-side maximum is controlled by the `max_page_size` configuration setting (default `1000`).  Requests that specify a `_limit` value above this ceiling are rejected with a validation error.
 
 | Setting | Default | Description |
 |---|---|---|
-| `max_page_length` | `1000` | Absolute upper bound on `_limit` |
+| `max_page_size` | `1000` | Absolute upper bound on `_limit` |
 
 ---
 

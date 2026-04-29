@@ -215,8 +215,8 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
             # TODO: what about exc?
             await set_role(session, request.user)
             limit_offset = filters[0]
-            if limit_offset.limit > settings.max_page_length:
-                raise ClientException(f"limit {limit_offset.limit} exceeds max_page_length {settings.max_page_length}")
+            if limit_offset.limit > settings.max_page_size:
+                raise ClientException(f"limit {limit_offset.limit} exceeds max_page_size {settings.max_page_size}")
             statement = limit_offset.append_to_statement(select(orm_class), orm_class)
             # statement = select(orm_class)
             if condition:

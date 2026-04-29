@@ -68,7 +68,7 @@ real `.env` — the repository's `.gitignore` excludes it.**
 | `pg_database` | `fusionserve` | PostgreSQL database name. |
 | `pg_app_schema` | `app_public` | Schema to introspect. |
 | `echo_sql` | `False` | Log SQL queries via SQLAlchemy `echo`. |
-| `max_page_length` | `1000` | Hard upper bound on a page size. |
+| `max_page_size` | `1000` | Hard upper bound on a page size. |
 | `anonymous_role` | `fusionserve` | PostgreSQL role assumed for unauthenticated requests. |
 | `jwt_issuer` | _(unset)_ | OIDC issuer URL; used for `iss` validation and JWKS discovery. |
 | `jwks_url` | _(unset)_ | Optional explicit JWKS endpoint (skips OIDC discovery). |
