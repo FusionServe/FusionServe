@@ -51,7 +51,7 @@ COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy only runtime assets (no sources needed: the package is installed).
-COPY --chown=app:app logging.yaml settings.yaml ./
+COPY --chown=app:app logging.yaml ./
 
 USER app
 

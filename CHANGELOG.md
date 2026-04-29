@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `persistence.introspect()` now builds the
+  ``CREATE OR REPLACE FUNCTION <schema>.current_user_id()`` DDL inside the
+  function body via the new ``_current_user_id_ddl`` helper, instead of at
+  module import time. The previous module-level f-string captured
+  ``settings.pg_app_schema`` once and ignored later changes — including
+  legitimate runtime configuration via environment variables that arrived
+  after ``persistence`` had already been imported. Symptom: integration
+  tests against a freshly-provisioned PostgreSQL failed with
+  ``schema "app_public" does not exist`` even after the test fixture had
+  pointed settings at a different schema.
+- The integration test fixture now creates the configured ``pg_app_schema``
+  explicitly (instead of monkeypatching the schema to ``"public"``) and
+  rebinds ``persistence.engine`` / ``persistence.async_session`` /
+  ``graphql.async_session`` so resolvers reach the test container even when
+  unit tests have already imported those modules.
+
 ### Security
 
 - Replaced `assert settings.jwt_issuer is not None` in `auth._resolve_jwks_url`

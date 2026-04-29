@@ -32,17 +32,26 @@ async def get_async_session():
         yield session
 
 
-current_user_id_ddl = DDL(
-    f"""
-    CREATE OR REPLACE FUNCTION {settings.pg_app_schema}.current_user_id()
-    RETURNS uuid
-    LANGUAGE sql
-    STABLE
-    AS $function$
-      SELECT current_setting('user.id', true)::uuid;
-    $function$;
+def _current_user_id_ddl(schema: str) -> DDL:
+    """Build the ``CREATE OR REPLACE FUNCTION current_user_id()`` DDL.
+
+    The function is materialised lazily (instead of at module import time)
+    so that ``settings.pg_app_schema`` is read at the moment :func:`introspect`
+    runs. This matters for tests that monkeypatch the schema after the
+    ``persistence`` module has already been imported.
     """
-)
+    return DDL(
+        f"""
+        CREATE OR REPLACE FUNCTION {schema}.current_user_id()
+        RETURNS uuid
+        LANGUAGE sql
+        STABLE
+        AS $function$
+          SELECT current_setting('user.id', true)::uuid;
+        $function$;
+        """
+    )
+
 
 #: Shared :mod:`inflect` engine used across the codebase. Constructed once
 #: and configured with ``classical(names=0)`` so plurals follow modern
@@ -113,8 +122,6 @@ def introspect() -> AutomapBase:
         ValueError: If any reflected table has a non-plural name.
     """
     # Introspection is only supported for sync engines.
-    # Scope the engine to this function so its connection pool is disposed
-    # before we return — we never use it again at runtime.
     _engine = create_engine(
         f"postgresql+psycopg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
         f"{settings.pg_host}:"
@@ -122,11 +129,12 @@ def introspect() -> AutomapBase:
         echo=settings.echo_sql,
         pool_pre_ping=True,
     )
+    schema = settings.pg_app_schema
     with _engine.begin() as connection:
-        _logger.debug("Running DDL to create current_user_id() function")
-        connection.execute(current_user_id_ddl)
+        _logger.debug("Running DDL to create %s.current_user_id() function", schema)
+        connection.execute(_current_user_id_ddl(schema))
     metadata = MetaData()
-    metadata.reflect(bind=_engine, schema=settings.pg_app_schema)
+    metadata.reflect(bind=_engine, schema=schema)
 
     Base = automap_base(metadata=metadata)
     # calling prepare() just sets up mapped classes and relationships.
