@@ -14,7 +14,7 @@ import strawberry
 from litestar import Request, WebSocket
 from litestar.datastructures import State
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import Table, and_, delete, func, insert, not_, or_, select, update
+from sqlalchemy import Column, Table, and_, delete, func, insert, not_, or_, select, update
 from sqlalchemy.ext.automap import AutomapBase
 from sqlalchemy.orm import DeclarativeMeta
 from sqlalchemy.sql.expression import ColumnElement
@@ -33,7 +33,7 @@ from strawberry_sqlalchemy_mapper import StrawberrySQLAlchemyLoader, StrawberryS
 from .auth import User
 from .config import settings
 from .models import COMPARISON_TYPE_MAP, RecordNotFoundError, ResolverType, SortDirection
-from .persistence import apply_load_only, async_session, inflect, set_role
+from .persistence import apply_load_only, async_session, inflect, parse_comments, set_role
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -135,8 +135,8 @@ async def custom_context_getter(request: Request) -> CustomContext:
     )
 
 
-@strawberry.experimental.pydantic.type(model=User, all_fields=True)
-class UserType:
+@strawberry.experimental.pydantic.type(model=User, all_fields=True, description="The authenticated user from JWT")
+class JWTUser:
     pass
 
 
@@ -155,6 +155,54 @@ def _set_resolver_arguments(field, arguments: list[StrawberryArgument]) -> None:
         arguments: The new argument list to install.
     """
     field.base_resolver.arguments = arguments
+
+
+def _column_default(column: Column, default: object) -> object:
+    """Return ``default`` wrapped in a ``strawberry.field`` if the column has a comment.
+
+    Looks up the column's smart-comment via :func:`parse_comments` and, when
+    the resulting ``content`` is non-empty, wraps the default in a Strawberry
+    field carrying that description. Otherwise the bare default is returned
+    unchanged so columns without comments don't carry empty descriptions.
+
+    Args:
+        column: The SQLAlchemy ``Column`` whose comment supplies the
+            description.
+        default: The default value to attach to the resulting input field
+            (typically ``strawberry.UNSET``).
+
+    Returns:
+        Either ``default`` unchanged, or a ``strawberry.field(...)`` carrying
+        the column's smart-comment content as its GraphQL description.
+    """
+    content = parse_comments(column).content
+    if not content:
+        return default
+    return strawberry.field(default=default, description=content)
+
+
+def _set_field_descriptions(gql_type: type, table: Table) -> None:
+    """Copy column comments onto the matching Strawberry output-field descriptions.
+
+    Walks ``gql_type.__strawberry_definition__.fields`` and, for every field
+    whose ``python_name`` matches a column on ``table``, sets the field's
+    GraphQL description from :func:`parse_comments`. Relationship fields and
+    other non-column fields are left untouched.
+
+    Args:
+        gql_type: The Strawberry-decorated output type returned by
+            ``mapper.type(orm_class)(...)``.
+        table: The SQLAlchemy ``Table`` whose column comments source the
+            descriptions.
+    """
+    fields_by_name = {f.python_name: f for f in gql_type.__strawberry_definition__.fields}
+    for column in table.columns:
+        field = fields_by_name.get(column.name)
+        if field is None:
+            continue
+        content = parse_comments(column).content
+        if content:
+            field.description = content
 
 
 def columns_from_selections(
@@ -222,7 +270,7 @@ def create_order_by_input(table: Table) -> type:
     defaults: dict[str, object] = {}
     for column in table.columns:
         annotations[column.name] = SortDirection | None
-        defaults[column.name] = strawberry.UNSET
+        defaults[column.name] = _column_default(column, strawberry.UNSET)
 
     class_name = f"{to_pascal(table.name)}OrderBy"
     cls = type(class_name, (object,), {"__annotations__": annotations, **defaults})
@@ -253,7 +301,7 @@ def create_where_input(table: Table) -> type:
             python_type = str
         comparison_type = COMPARISON_TYPE_MAP.get(python_type, COMPARISON_TYPE_MAP[str])
         annotations[column.name] = comparison_type | None
-        defaults[column.name] = strawberry.UNSET
+        defaults[column.name] = _column_default(column, strawberry.UNSET)
 
     class_name = f"{to_pascal(table.name)}Where"
     cls = type(class_name, (object,), {"__annotations__": annotations, **defaults})
@@ -293,7 +341,7 @@ def create_input_type(table: Table, mapper: StrawberrySQLAlchemyMapper) -> type:
         except NotImplementedError:
             column_type = str
         annotations[column.name] = column_type
-        defaults[column.name] = strawberry.UNSET
+        defaults[column.name] = _column_default(column, strawberry.UNSET)
         if column.server_default is not None:
             annotations[column.name] = column_type | None
 
@@ -330,7 +378,7 @@ def patch_input_type(table: Table, mapper: StrawberrySQLAlchemyMapper) -> type:
         except NotImplementedError:
             column_type = str
         annotations[column.name] = column_type | None
-        defaults[column.name] = strawberry.UNSET
+        defaults[column.name] = _column_default(column, strawberry.UNSET)
 
     class_name = f"{to_pascal(table.name)}Patch"
     cls = type(class_name, (object,), {"__annotations__": annotations, **defaults})
@@ -812,7 +860,7 @@ def build(_base: AutomapBase):
         """
 
         @strawberry.field
-        def current_user(self, info: strawberry.Info[CustomHTTPContextType, None]) -> UserType | None:
+        def current_user(self, info: strawberry.Info[CustomHTTPContextType, None]) -> JWTUser | None:
             return info.context.request.user or None
 
     class Mutation:
@@ -820,8 +868,12 @@ def build(_base: AutomapBase):
 
     for orm_class in _base.classes:
         table: Table = orm_class.__table__
+        comment = parse_comments(table)
         pks = table.primary_key.columns.keys()
-        gql_type = mapper.type(orm_class)(type(table.name, (object,), {}))
+        gql_type = mapper.type(orm_class)(type(to_pascal(inflect.singular_noun(table.name)), (object,), {}))
+        if comment.content:
+            gql_type.__strawberry_definition__.description = comment.content
+        _set_field_descriptions(gql_type, table)
         # ---- Query: list ----
         setattr(
             Query,
