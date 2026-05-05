@@ -14,8 +14,7 @@ import strawberry
 from litestar import Request, WebSocket
 from litestar.datastructures import State
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import Column, Table, and_, delete, func, insert, not_, or_, select, update
-from sqlalchemy.ext.automap import AutomapBase
+from sqlalchemy import Column, Table, and_, delete, func, insert, not_, or_, select, text, update
 from sqlalchemy.orm import DeclarativeMeta
 from sqlalchemy.sql.expression import ColumnElement
 from strawberry.annotation import StrawberryAnnotation
@@ -27,13 +26,22 @@ from strawberry.litestar import (
     make_graphql_controller,
 )
 from strawberry.types.arguments import StrawberryArgument
-from strawberry.utils.str_converters import to_snake_case
+from strawberry.utils.str_converters import to_camel_case, to_snake_case
 from strawberry_sqlalchemy_mapper import StrawberrySQLAlchemyLoader, StrawberrySQLAlchemyMapper
 
 from .auth import User
 from .config import settings
-from .models import COMPARISON_TYPE_MAP, RecordNotFoundError, ResolverType, SortDirection
-from .persistence import apply_load_only, async_session, inflect, parse_comments, set_role
+from .models import (
+    COMPARISON_TYPE_MAP,
+    FunctionInfo,
+    FunctionReturnKind,
+    Introspection,
+    RecordNotFoundError,
+    ResolverType,
+    SmartComment,
+    SortDirection,
+)
+from .persistence import apply_load_only, async_session, inflect, set_role
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -160,10 +168,11 @@ def _set_resolver_arguments(field, arguments: list[StrawberryArgument]) -> None:
 def _column_default(column: Column, default: object) -> object:
     """Return ``default`` wrapped in a ``strawberry.field`` if the column has a comment.
 
-    Looks up the column's smart-comment via :func:`parse_comments` and, when
-    the resulting ``content`` is non-empty, wraps the default in a Strawberry
-    field carrying that description. Otherwise the bare default is returned
-    unchanged so columns without comments don't carry empty descriptions.
+    Looks up the column's smart-comment via :meth:`SmartComment.from_object`
+    and, when the resulting ``content`` is non-empty, wraps the default in a
+    Strawberry field carrying that description. Otherwise the bare default is
+    returned unchanged so columns without comments don't carry empty
+    descriptions.
 
     Args:
         column: The SQLAlchemy ``Column`` whose comment supplies the
@@ -175,7 +184,7 @@ def _column_default(column: Column, default: object) -> object:
         Either ``default`` unchanged, or a ``strawberry.field(...)`` carrying
         the column's smart-comment content as its GraphQL description.
     """
-    content = parse_comments(column).content
+    content = SmartComment.from_object(column).content
     if not content:
         return default
     return strawberry.field(default=default, description=content)
@@ -186,8 +195,8 @@ def _set_field_descriptions(gql_type: type, table: Table) -> None:
 
     Walks ``gql_type.__strawberry_definition__.fields`` and, for every field
     whose ``python_name`` matches a column on ``table``, sets the field's
-    GraphQL description from :func:`parse_comments`. Relationship fields and
-    other non-column fields are left untouched.
+    GraphQL description from :meth:`SmartComment.from_object`. Relationship
+    fields and other non-column fields are left untouched.
 
     Args:
         gql_type: The Strawberry-decorated output type returned by
@@ -200,7 +209,7 @@ def _set_field_descriptions(gql_type: type, table: Table) -> None:
         field = fields_by_name.get(column.name)
         if field is None:
             continue
-        content = parse_comments(column).content
+        content = SmartComment.from_object(column).content
         if content:
             field.description = content
 
@@ -835,23 +844,117 @@ def resolver_factory(
     }[resolver_type]
 
 
-def build(_base: AutomapBase):
-    """Build a Strawberry GraphQL schema and Litestar controller from reflected tables.
+class _UnmappableFunctionError(RuntimeError):
+    """Raised when a :class:`FunctionInfo` can't be wired into the GraphQL schema.
+
+    Used as a control-flow signal inside :func:`build`: the loop catches it,
+    logs a warning, and skips the offending function rather than aborting the
+    whole startup.
+    """
+
+
+def _function_return_annotation(fn: FunctionInfo, mapper: StrawberrySQLAlchemyMapper):
+    """Resolve the GraphQL return-type annotation for a custom-query function.
+
+    Args:
+        fn: The function metadata.
+        mapper: The active :class:`StrawberrySQLAlchemyMapper`. Required for
+            ``ROW`` / ``SET`` returns so the previously-mapped table type can
+            be looked up by its Pascal-cased singular name.
+
+    Returns:
+        A typing-compatible annotation:
+
+        * ``T | None`` for ``SCALAR`` (where ``T`` is the mapped Python type),
+        * ``GqlType | None`` for ``ROW``,
+        * ``list[GqlType]`` for ``SET``.
+
+    Raises:
+        _UnmappableFunctionError: If the function's return table has no mapped
+            Strawberry type yet.
+    """
+    if fn.return_kind == FunctionReturnKind.SCALAR:
+        return fn.return_python_type | None
+    type_name = to_pascal(inflect.singular_noun(fn.return_table_name) or fn.return_table_name)
+    gql_type = mapper.mapped_types.get(type_name)
+    if gql_type is None:
+        raise _UnmappableFunctionError(
+            f"return table {fn.return_table_name!r} has no GraphQL type mapped (expected {type_name!r})"
+        )
+    if fn.return_kind == FunctionReturnKind.SET:
+        return list[gql_type]
+    return gql_type | None
+
+
+def _build_function_resolver(fn: FunctionInfo, base):
+    """Build the async resolver that invokes a custom-query function.
+
+    The resolver opens a fresh async session, applies the request user's
+    PostgreSQL role, and issues a single ``SELECT`` against the function with
+    PostgreSQL's named-argument call syntax (``arg := :arg``) so that any
+    arguments left as :data:`strawberry.UNSET` fall back to the function's
+    declared ``DEFAULT``.
+
+    For ``ROW`` / ``SET`` returns the statement is wrapped in
+    ``select(orm_class).from_statement(...)`` so the result rows come back as
+    automap ORM instances — exactly the shape the
+    ``strawberry-sqlalchemy-mapper``-generated field resolvers expect.
+    ``SCALAR`` returns are read with ``.scalar()`` directly.
+
+    Args:
+        fn: The function metadata.
+        base: The SQLAlchemy automap base; used to look up the ORM class for
+            ``ROW`` / ``SET`` returns.
+
+    Returns:
+        An async callable suitable for ``strawberry.field(resolver=...)``.
+        Its argument signature is patched after the fact via
+        :func:`_set_resolver_arguments`.
+    """
+    qualified = f'"{fn.schema}"."{fn.name}"'
+
+    async def resolver(info: strawberry.Info[CustomHTTPContextType, None], **kwargs: object):
+        bind = {k: v for k, v in kwargs.items() if v is not strawberry.UNSET}
+        placeholders = ", ".join(f"{name} := :{name}" for name in bind)
+        async with async_session() as session:
+            await set_role(session, info.context.request.user)
+            if fn.return_kind == FunctionReturnKind.SCALAR:
+                sql = f"SELECT {qualified}({placeholders}) AS value"
+                return (await session.execute(text(sql).bindparams(**bind))).scalar()
+            sql = f"SELECT * FROM {qualified}({placeholders})"
+            orm_class = base.classes[fn.return_table_name]
+            stmt = select(orm_class).from_statement(text(sql).bindparams(**bind))
+            rows = (await session.execute(stmt)).scalars().all()
+            if fn.return_kind == FunctionReturnKind.SET:
+                return list(rows)
+            return rows[0] if rows else None
+
+    return resolver
+
+
+def build(introspection: Introspection):
+    """Build a Strawberry GraphQL schema and Litestar controller from an :class:`Introspection`.
 
     Each invocation produces an isolated ``StrawberrySQLAlchemyMapper`` plus
     fresh ``Query`` and ``Mutation`` skeletons, so the function is safe to
     call repeatedly (test reload, dev hot-reload, multiple Litestar apps in
     the same process).
 
+    Per-table CRUD fields are derived from ``introspection.base.classes``,
+    and one custom-query field per :class:`FunctionInfo` in
+    ``introspection.functions`` is appended to the ``Query`` root after the
+    table loop.
+
     Args:
-        _base: The SQLAlchemy automap base whose ``.classes`` attribute
-            maps table names to ORM classes.
+        introspection: The introspection result produced by
+            :func:`fusionserve.persistence.introspect`.
 
     Returns:
         A Litestar-compatible GraphQL controller ready to be mounted
         on the application.
     """
     mapper = StrawberrySQLAlchemyMapper(always_use_list=True)
+    _base = introspection.base
 
     class Query:
         """Root GraphQL query type for this build.
@@ -868,7 +971,7 @@ def build(_base: AutomapBase):
 
     for orm_class in _base.classes:
         table: Table = orm_class.__table__
-        comment = parse_comments(table)
+        comment = SmartComment.from_object(table)
         pks = table.primary_key.columns.keys()
         gql_type = mapper.type(orm_class)(type(to_pascal(inflect.singular_noun(table.name)), (object,), {}))
         if comment.content:
@@ -1057,6 +1160,54 @@ def build(_base: AutomapBase):
                 ),
             ],
         )
+
+    # ---- Custom queries from STABLE/IMMUTABLE PostgreSQL functions ----
+    existing_query_fields = {name for name in dir(Query) if not name.startswith("__")}
+    for fn in introspection.functions:
+        field_name = to_camel_case(fn.name)
+        if field_name in existing_query_fields:
+            # TODO: collision-resolution strategy. Options under consideration:
+            #   * prefix function fields with ``fn_`` or expose under a nested ``rpc`` namespace
+            #   * allow function to win when explicitly opted-in via smart-comment metadata
+            # For v1: existing query field wins, function is dropped.
+            _logger.warning(
+                "Skipping GraphQL exposure of function %s.%s: field name %r collides with an existing query field.",
+                fn.schema,
+                fn.name,
+                field_name,
+            )
+            continue
+        try:
+            return_annotation = _function_return_annotation(fn, mapper)
+        except _UnmappableFunctionError as exc:
+            _logger.warning(
+                "Skipping GraphQL exposure of function %s.%s: %s",
+                fn.schema,
+                fn.name,
+                exc,
+            )
+            continue
+        setattr(
+            Query,
+            field_name,
+            strawberry.field(
+                resolver=_build_function_resolver(fn, _base),
+                description=fn.description or f"Custom query exposing {fn.schema}.{fn.name}().",
+            ),
+        )
+        arguments: list[StrawberryArgument] = []
+        for p in fn.params:
+            annotation = StrawberryAnnotation(p.python_type | None if p.has_default else p.python_type)
+            if p.has_default:
+                arguments.append(StrawberryArgument(p.name, p.name, annotation, default=strawberry.UNSET))
+            else:
+                arguments.append(StrawberryArgument(p.name, p.name, annotation))
+        _set_resolver_arguments(getattr(Query, field_name), arguments)
+        # Override the inferred return type — the resolver itself is annotated
+        # with ``Any`` because ``_build_function_resolver`` is not a closure
+        # over the per-table types.
+        getattr(Query, field_name).type_annotation = StrawberryAnnotation(return_annotation)
+        existing_query_fields.add(field_name)
 
     # Models related to models in the schema are automatically mapped here.
     mapper.finalize()

@@ -30,10 +30,12 @@ swagger_ui_parameters = {
 @asynccontextmanager
 async def lifespan(app: Litestar):
     # ---- startup ----
-    Base = introspect()
-    for controller in rest.build(Base):
+    schema = introspect()
+    for controller in rest.build(schema.base):
         app.register(controller)
-    app.register(graphql.build(Base))
+    for controller in rest.build_function_controllers(schema):
+        app.register(controller)
+    app.register(graphql.build(schema))
     yield
 
 

@@ -19,7 +19,7 @@ from sqlalchemy import (
 )
 
 from fusionserve.models import SmartComment
-from fusionserve.persistence import parse_comments, pydantic_field_from_column
+from fusionserve.persistence import pydantic_field_from_column
 
 
 def _make_table(comment: str | None = None) -> Table:
@@ -41,7 +41,7 @@ def _make_table(comment: str | None = None) -> Table:
 
 def test_parse_comments_no_comment_returns_empty_smartcomment():
     table = _make_table(comment=None)
-    result = parse_comments(table)
+    result = SmartComment.from_object(table)
     assert isinstance(result, SmartComment)
     assert result.metadata is None
     assert result.content is None
@@ -49,7 +49,7 @@ def test_parse_comments_no_comment_returns_empty_smartcomment():
 
 def test_parse_comments_plain_text_only_populates_content():
     table = _make_table(comment="Just some prose, no frontmatter.")
-    result = parse_comments(table)
+    result = SmartComment.from_object(table)
     assert result.metadata is None
     assert result.content == "Just some prose, no frontmatter."
 
@@ -57,7 +57,7 @@ def test_parse_comments_plain_text_only_populates_content():
 def test_parse_comments_with_frontmatter_splits_metadata_and_content():
     comment = "---\nrole: admin\nlabel: Users\n---\nThe users table.\n"
     table = _make_table(comment=comment)
-    result = parse_comments(table)
+    result = SmartComment.from_object(table)
     assert result.metadata == {"role": "admin", "label": "Users"}
     assert result.content == "The users table.\n"
 
@@ -67,7 +67,7 @@ def test_parse_comments_with_invalid_yaml_falls_back_to_plain_content():
     # treating the whole comment as plain content.
     comment = '---\nrole: "admin\n---\nrest of body\n'
     table = _make_table(comment=comment)
-    result = parse_comments(table)
+    result = SmartComment.from_object(table)
     assert result.metadata is None
     assert result.content == comment
 

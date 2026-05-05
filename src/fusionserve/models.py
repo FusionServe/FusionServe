@@ -1,12 +1,23 @@
 import datetime
+import re
 import uuid
-from enum import Enum
-from typing import Any
+from collections.abc import Mapping
+from dataclasses import dataclass
+from dataclasses import field as dc_field
+from enum import Enum, StrEnum
+from typing import Any, Literal
 
 import strawberry
-from pydantic import BaseModel, Field
+import yaml
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import Column, Table
+from sqlalchemy.ext.automap import AutomapBase
 
 from .config import settings
+
+# Compiled once at module level; reusing compiled objects avoids per-call overhead.
+_FRONTMATTER_PATTERN = re.compile(r"^---\s*$.*^---\s*$.*", re.MULTILINE | re.DOTALL)
+_FRONTMATTER_BOUNDARY = re.compile(r"^---\s*$", re.MULTILINE)
 
 
 class ResolverType(Enum):
@@ -173,8 +184,65 @@ class PaginationParams(BaseModel):
 
 
 class SmartComment(BaseModel):
+    """Parsed table / column / function comment, optionally with YAML frontmatter.
+
+    Attributes:
+        metadata: YAML-frontmatter dict, when present.
+        content: Plain-text body following the (optional) frontmatter block.
+    """
+
     metadata: dict[str, Any] | None = None
     content: str | None = None
+
+    @classmethod
+    def from_text(cls, comment: str | None) -> SmartComment:
+        """Parse a raw comment string, extracting optional YAML frontmatter.
+
+        If the input starts with a YAML frontmatter block delimited by ``---``
+        markers, the metadata is parsed and returned alongside the plain-text
+        content. Any YAML parse error falls back to returning the whole input
+        as plain-text content — no exception is raised (per the parsing
+        contract).
+
+        Args:
+            comment: The raw comment string. ``None`` or empty input yields an
+                empty :class:`SmartComment`.
+
+        Returns:
+            A :class:`SmartComment` with optional ``metadata`` and ``content``
+            fields populated.
+        """
+        if not comment:
+            return cls()
+
+        if not _FRONTMATTER_PATTERN.fullmatch(comment):
+            return cls(content=comment)
+
+        _, frontmatter, content = _FRONTMATTER_BOUNDARY.split(comment, 2)
+
+        try:
+            metadata = yaml.safe_load(frontmatter)
+        except yaml.YAMLError:
+            return cls(content=comment)
+
+        return cls(metadata=metadata, content=content.lstrip("\n"))
+
+    @classmethod
+    def from_object(cls, obj: Table | Column) -> SmartComment:
+        """Parse the ``.comment`` attribute of a SQLAlchemy ``Table`` or ``Column``.
+
+        Thin adapter around :meth:`from_text` for SQLAlchemy ``Table`` and
+        ``Column`` objects (both expose ``.comment``).
+
+        Args:
+            obj: SQLAlchemy ``Table`` or ``Column`` whose ``comment`` attribute
+                is parsed.
+
+        Returns:
+            A :class:`SmartComment` with optional ``metadata`` and ``content``
+            fields populated.
+        """
+        return cls.from_text(obj.comment)
 
 
 class RecordNotFoundError(Exception):
@@ -183,3 +251,281 @@ class RecordNotFoundError(Exception):
     Used by GraphQL resolvers (PK lookup, update, delete) so callers see
     a typed, message-bearing error rather than a bare ``Exception``.
     """
+
+
+class FunctionVolatility(StrEnum):
+    """PostgreSQL function volatility classifications we expose as queries.
+
+    Only ``STABLE`` and ``IMMUTABLE`` functions are eligible for the custom-query
+    feature; ``VOLATILE`` functions are deliberately excluded because they may
+    have side effects and conceptually belong on the ``Mutation`` root.
+    """
+
+    STABLE = "s"
+    IMMUTABLE = "i"
+
+
+class FunctionReturnKind(StrEnum):
+    """The shape of a custom-query function's return value.
+
+    Attributes:
+        SCALAR: Function returns a single mapped Python scalar.
+        ROW: Function returns a single row of an existing table type.
+        SET: Function returns ``SETOF`` an existing table type (zero or more rows).
+    """
+
+    SCALAR = "scalar"
+    ROW = "row"
+    SET = "set"
+
+
+class FunctionSkipReason(StrEnum):
+    """Why a discovered PG function cannot be exposed as a custom query.
+
+    Attributes:
+        NON_IN_ARG_MODE: One or more parameters use OUT/INOUT/VARIADIC/TABLE
+            modes; only pure IN parameters are supported in v1.
+        UNNAMED_ARG: One or more parameters are positional-only (no entry in
+            ``proargnames``); custom queries require named parameters so the
+            GraphQL/REST surfaces have argument names to expose.
+        UNSUPPORTED_ARG_TYPE: At least one parameter's PostgreSQL type is not
+            in the supported scalar map.
+        UNSUPPORTED_RETURN: The return type is neither a supported scalar nor
+            a known reflected table (single row or SETOF).
+    """
+
+    NON_IN_ARG_MODE = "non_in_arg_mode"
+    UNNAMED_ARG = "unnamed_arg"
+    UNSUPPORTED_ARG_TYPE = "unsupported_arg_type"
+    UNSUPPORTED_RETURN = "unsupported_return"
+
+
+@dataclass(frozen=True)
+class FunctionSkip:
+    """Sentinel returned from :meth:`PgFunctionInfo.to_function_info`.
+
+    Carries enough context for the caller to log a useful warning. The model
+    method itself never logs — separation of policy (the loader logs) from
+    classification (the model decides) keeps both halves easy to test.
+
+    Attributes:
+        reason: Categorical reason for the skip.
+        message: Human-readable detail (already formatted, ready for logging).
+    """
+
+    reason: FunctionSkipReason
+    message: str
+
+
+@dataclass
+class FunctionParam:
+    """One IN parameter of a custom-query function.
+
+    Attributes:
+        name: The parameter name as declared in PostgreSQL (snake_case).
+        pg_type: The PostgreSQL type name (e.g. ``int4``, ``uuid``).
+        python_type: The Python / Strawberry type the parameter is mapped to.
+        has_default: ``True`` if the function declares a PG-side default for
+            this parameter; the GraphQL / REST argument is optional in that
+            case so the default is honoured.
+    """
+
+    name: str
+    pg_type: str
+    python_type: type
+    has_default: bool
+
+
+@dataclass
+class FunctionInfo:
+    """Metadata for one custom-query PostgreSQL function.
+
+    Populated by :func:`fusionserve.persistence._introspect_functions` and
+    consumed by both the GraphQL builder and the REST controller builder.
+
+    Attributes:
+        schema: The PostgreSQL schema the function lives in.
+        name: The function name as declared in PostgreSQL (snake_case).
+        volatility: ``STABLE`` or ``IMMUTABLE``.
+        params: Ordered list of IN parameters.
+        return_kind: Whether the function returns a scalar, a row, or a set.
+        return_pg_type: PostgreSQL type name of the return.
+        return_python_type: Mapped Python type for ``SCALAR`` returns; ``None``
+            when the return is a row or a set of a known table.
+        return_table_name: Table name when the return is a row or set of an
+            existing reflected table; ``None`` otherwise.
+        description: Plain-text portion of the function's smart comment.
+        metadata: YAML-frontmatter portion of the function's smart comment
+            (currently stored for future authorization hooks; unused at v1).
+    """
+
+    schema: str
+    name: str
+    volatility: FunctionVolatility
+    params: list[FunctionParam]
+    return_kind: FunctionReturnKind
+    return_pg_type: str
+    return_python_type: type | None = None
+    return_table_name: str | None = None
+    description: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass
+class Introspection:
+    """Result of one schema-introspection pass.
+
+    Bundles the SQLAlchemy automap base with the discovered custom-query
+    functions so callers (REST + GraphQL builders) can be wired off a single
+    object.
+
+    Attributes:
+        base: The SQLAlchemy automap ``Base`` whose ``.classes`` attribute
+            maps reflected table names to ORM classes.
+        functions: List of :class:`FunctionInfo` entries — one per supported
+            ``STABLE`` / ``IMMUTABLE`` function discovered in
+            ``settings.pg_app_schema``.
+    """
+
+    base: AutomapBase
+    functions: list[FunctionInfo] = dc_field(default_factory=list)
+
+    # immutable, stable, volatile
+
+
+ProKind = Literal["f", "a", "w", "p"]  # function, aggregate, window, procedure
+TypType = Literal["b", "c", "d", "e", "p", "r", "m"]
+# base, composite, domain, enum,
+# pseudo, range, multirange
+ArgMode = Literal["i", "o", "b", "v", "t"]  # in, out, inout, variadic, table
+
+
+class PgFunctionInfo(BaseModel):
+    """A row from a pg_proc + pg_type + pg_description introspection query."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+    # Identity
+    oid: int = Field(ge=0)
+    proname: str = Field(min_length=1)
+    # Behavior flags
+    provolatile: FunctionVolatility
+    prokind: ProKind
+    proretset: bool
+    # Argument shape
+    pronargs: int = Field(ge=0)
+    pronargdefaults: int = Field(ge=0)
+    proargnames: list[str] | None = None
+    proargmodes: list[ArgMode] | None = None
+    arg_typnames: list[str]
+    # Return shape
+    return_typname: str = Field(min_length=1)
+    return_typtype: TypType
+    return_typrelid: int = Field(ge=0)
+    return_relname: str | None = None
+    # Description
+    comment: str | None = None
+
+    def to_function_info(
+        self,
+        schema: str,
+        known_tables: set[str],
+        pg_to_py: Mapping[str, type],
+    ) -> FunctionInfo | FunctionSkip:
+        """Project this raw PG row into a validated domain :class:`FunctionInfo`.
+
+        Validates argument modes (IN-only), argument naming, argument types
+        against ``pg_to_py``, and the return classification (scalar / known
+        table row / SETOF known table). Smart-comment parsing happens here
+        too so the produced :class:`FunctionInfo` is fully populated.
+
+        Overload detection is **not** performed here because it is not
+        observable from a single row — the caller groups by ``proname`` and
+        elides duplicates before invoking this method.
+
+        Args:
+            schema: The schema the function lives in. Carried through to the
+                produced :class:`FunctionInfo`; not derived from this row.
+            known_tables: Names of tables already reflected by automap; used
+                to validate ROW / SET return types.
+            pg_to_py: Map from ``pg_type.typname`` to the Python / Strawberry
+                type to expose. Passed in (rather than imported) so the model
+                stays decoupled from any particular type-map source and can
+                be unit-tested with a fake.
+
+        Returns:
+            A populated :class:`FunctionInfo` on success, or a
+            :class:`FunctionSkip` describing why this row cannot be exposed.
+        """
+        # 1. Reject non-IN argument modes. ``proargmodes`` is NULL when every
+        #    argument is IN.
+        if self.proargmodes is not None and any(m != "i" for m in self.proargmodes[: self.pronargs]):
+            return FunctionSkip(
+                reason=FunctionSkipReason.NON_IN_ARG_MODE,
+                message="only pure IN parameters are supported (found OUT/INOUT/VARIADIC/TABLE modes).",
+            )
+        # 2. Reject positional-only parameters (no ``proargnames`` array).
+        if self.pronargs > 0 and not self.proargnames:
+            return FunctionSkip(
+                reason=FunctionSkipReason.UNNAMED_ARG,
+                message="positional-only parameters are not supported. "
+                "Declare named parameters in the function signature.",
+            )
+        # 3. Validate per-argument types and build domain ``FunctionParam``s.
+        params: list[FunctionParam] = []
+        for idx in range(self.pronargs):
+            pg_type = self.arg_typnames[idx] if idx < len(self.arg_typnames) else None
+            if pg_type is None or pg_type not in pg_to_py:
+                return FunctionSkip(
+                    reason=FunctionSkipReason.UNSUPPORTED_ARG_TYPE,
+                    message=f"argument #{idx + 1} has unsupported PostgreSQL type {pg_type!r}.",
+                )
+            arg_name = (self.proargnames[idx] if self.proargnames and idx < len(self.proargnames) else "") or ""
+            if not arg_name:
+                return FunctionSkip(
+                    reason=FunctionSkipReason.UNNAMED_ARG,
+                    message=f"argument #{idx + 1} has no declared name.",
+                )
+            # PG-side defaults attach to the trailing ``pronargdefaults`` arguments.
+            has_default = idx >= (self.pronargs - self.pronargdefaults)
+            params.append(
+                FunctionParam(
+                    name=arg_name,
+                    pg_type=pg_type,
+                    python_type=pg_to_py[pg_type],
+                    has_default=has_default,
+                )
+            )
+        # 4. Classify the return.
+        return_python_type: type | None = None
+        return_table_name: str | None = None
+        if self.return_relname and self.return_relname in known_tables:
+            return_table_name = self.return_relname
+            return_kind = FunctionReturnKind.SET if self.proretset else FunctionReturnKind.ROW
+        elif not self.proretset and self.return_typname in pg_to_py:
+            return_kind = FunctionReturnKind.SCALAR
+            return_python_type = pg_to_py[self.return_typname]
+        else:
+            prefix = "SETOF " if self.proretset else ""
+            return FunctionSkip(
+                reason=FunctionSkipReason.UNSUPPORTED_RETURN,
+                message=f"unsupported return type {prefix}{self.return_typname!r} "
+                "(expected scalar, single row of a known table, or SETOF a known table).",
+            )
+        # 5. Smart-comment parsing.
+        smart = SmartComment.from_text(self.comment)
+        return FunctionInfo(
+            schema=schema,
+            name=self.proname,
+            volatility=self.provolatile,
+            params=params,
+            return_kind=return_kind,
+            return_pg_type=self.return_typname,
+            return_python_type=return_python_type,
+            return_table_name=return_table_name,
+            description=smart.content,
+            metadata=smart.metadata,
+        )

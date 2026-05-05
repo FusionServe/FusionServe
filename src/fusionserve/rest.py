@@ -7,7 +7,7 @@ field-level filtering, and OData-style advanced filters.
 """
 
 import logging
-from typing import Annotated, ClassVar
+from typing import Annotated, Any, ClassVar
 
 import litestar
 import odata_query
@@ -20,16 +20,17 @@ from litestar.exceptions import ClientException, NotFoundException
 from litestar.params import Dependency
 from pydantic import BaseModel, ConfigDict, create_model
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import Table, select
+from sqlalchemy import Table, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.automap import AutomapBase
 from sqlalchemy.orm import DeclarativeMeta
+from strawberry.scalars import JSON as StrawberryJSON
 
 from . import auth
 from .config import settings
 from .di import create_filter_dependencies
-from .models import AdvancedFilter
-from .persistence import inflect, parse_comments, pydantic_field_from_column, set_role
+from .models import AdvancedFilter, FunctionInfo, FunctionReturnKind, Introspection, SmartComment
+from .persistence import async_session, inflect, pydantic_field_from_column, set_role
 
 _logger = logging.getLogger(settings.app_name)
 # tags_metadata = []
@@ -149,7 +150,7 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
     table: Table = orm_class.__table__
     table_name = table.name
     pkeys = table.primary_key.columns.keys()
-    comment = parse_comments(table)
+    comment = SmartComment.from_object(table)
     response_model = create_response_model(table)
     get_input_model = create_get_input_model(table)
     create_input_model = create_create_input_model(table)
@@ -402,3 +403,285 @@ def build(_base: AutomapBase) -> list[litestar.Controller]:
         one per table in ``_base.classes``.
     """
     return [create_controller(orm_class) for orm_class in _base.classes]
+
+
+def _python_type_for_rest(t: type) -> Any:
+    """Translate a function param/return Python type into a Pydantic-friendly type.
+
+    The custom-query introspection map uses :data:`strawberry.scalars.JSON` for
+    PostgreSQL ``json`` / ``jsonb`` so that GraphQL gets a lossless JSON
+    scalar. Pydantic doesn't understand that NewType wrapper; for the REST
+    surface we map it back to ``Any`` (Pydantic accepts arbitrary JSON
+    natively). Every other type passes through unchanged.
+
+    Args:
+        t: The Python type to adapt.
+
+    Returns:
+        ``Any`` if ``t`` is the Strawberry ``JSON`` scalar, otherwise ``t``.
+    """
+    if t is StrawberryJSON:
+        return Any
+    return t
+
+
+def _scalar_response_model(fn: FunctionInfo) -> type[BaseModel]:
+    """Build the ``{"value": <scalar>}`` Pydantic response model for a SCALAR function.
+
+    Args:
+        fn: The function metadata; ``fn.return_python_type`` must be set.
+
+    Returns:
+        A Pydantic model with a single ``value`` field whose type matches the
+        function's mapped scalar return type.
+    """
+    return create_model(
+        f"{to_pascal(fn.name)}ScalarResponse",
+        __config__=ConfigDict(from_attributes=True),
+        value=(_python_type_for_rest(fn.return_python_type) | None, None),
+    )
+
+
+def _function_argument_dependencies(fn: FunctionInfo) -> dict[str, type | Any]:
+    """Build a Litestar handler signature dict for a function's IN parameters.
+
+    Returns a mapping of ``{param_name: type_annotation}`` suitable for
+    splatting into a dynamically-created handler. Optional (``has_default``)
+    parameters are typed as ``T | None`` and default to ``None``; required
+    ones are typed as ``T`` with no default. Splatting this mapping into
+    function-creation machinery is currently NOT used directly — instead the
+    handler reads parameters from the ``Request.query_params`` mapping at
+    runtime — but this helper is exposed for future use where Litestar's
+    typed query-parameter dependency injection is desired.
+
+    Args:
+        fn: The function metadata.
+
+    Returns:
+        Mapping of parameter name to its REST-side Python type annotation.
+    """
+    return {p.name: _python_type_for_rest(p.python_type) for p in fn.params}
+
+
+def _coerce_query_param(raw: str, python_type: type) -> Any:
+    """Best-effort coercion of a query-string value to the declared Python type.
+
+    Litestar would normally do this automatically when handler parameters are
+    typed, but the function-controller handlers receive parameters via the
+    raw query-params mapping (the param set is dynamic per function). This
+    helper applies a minimal, well-defined coercion so the resulting bind
+    value round-trips correctly through asyncpg.
+
+    Args:
+        raw: The raw string value from the query string.
+        python_type: The target Python type from
+            :data:`fusionserve.persistence._PG_TO_PY` (or ``Any``).
+
+    Returns:
+        The coerced value, or ``raw`` unchanged if no coercion rule matches.
+
+    Raises:
+        litestar.exceptions.ClientException: If the value cannot be coerced
+            to the declared type.
+    """
+    if python_type in (str, Any) or python_type is StrawberryJSON:
+        return raw
+    try:
+        if python_type is int:
+            return int(raw)
+        if python_type is float:
+            return float(raw)
+        if python_type is bool:
+            lowered = raw.lower()
+            if lowered in ("true", "1", "yes", "on"):
+                return True
+            if lowered in ("false", "0", "no", "off"):
+                return False
+            raise ValueError(f"cannot interpret {raw!r} as bool")
+        # Fallback: instantiate the type from the raw string. Works for
+        # ``Decimal``, ``uuid.UUID``, and the ``datetime`` classes (which all
+        # parse ISO-style strings via their ``fromisoformat`` constructors).
+        if hasattr(python_type, "fromisoformat"):
+            return python_type.fromisoformat(raw)
+        return python_type(raw)
+    except (ValueError, TypeError) as exc:
+        raise ClientException(f"Invalid value for parameter: {exc}") from exc
+
+
+def _build_function_sql(fn: FunctionInfo, supplied_params: list[str]) -> str:
+    """Compose the SQL statement that invokes ``fn`` with the supplied named args.
+
+    Uses PostgreSQL's named-argument call syntax (``arg := :arg``) so that any
+    parameters omitted by the caller fall back to the function's declared
+    PostgreSQL ``DEFAULT``.
+
+    Args:
+        fn: The function metadata.
+        supplied_params: Names of the parameters the caller actually sent
+            (i.e. the keys of the bind mapping). Schema/function names are
+            sourced from validated introspection metadata, never from
+            client-controlled input.
+
+    Returns:
+        A SQL string with named placeholders for every supplied argument.
+    """
+    qualified = f'"{fn.schema}"."{fn.name}"'
+    placeholders = ", ".join(f"{name} := :{name}" for name in supplied_params)
+    if fn.return_kind == FunctionReturnKind.SCALAR:
+        return f"SELECT {qualified}({placeholders}) AS value"
+    return f"SELECT * FROM {qualified}({placeholders})"
+
+
+def create_function_controller(
+    fn: FunctionInfo,
+    base: AutomapBase,
+) -> type[litestar.Controller]:
+    """Dynamically create a Litestar Controller for one custom-query function.
+
+    Mounts ``GET {settings.base_path}/{fn.name}``. Arguments are read from the
+    query string and coerced to the declared Python type per
+    :func:`_coerce_query_param`. The handler:
+
+    * opens an :func:`async_session`,
+    * applies the per-request PostgreSQL role via
+      :func:`fusionserve.persistence.set_role`,
+    * issues the function call with named-argument PG syntax so server-side
+      defaults are honoured for omitted arguments,
+    * shapes the response per :class:`fusionserve.models.FunctionReturnKind`.
+
+    Args:
+        fn: The function metadata.
+        base: The SQLAlchemy automap base — needed to look up the ORM class
+            for ``ROW`` / ``SET`` returns and build their Pydantic response
+            models.
+
+    Returns:
+        A dynamically constructed :class:`litestar.Controller` subclass.
+    """
+    description = fn.description or f"Custom query exposing {fn.schema}.{fn.name}()."
+
+    if fn.return_kind == FunctionReturnKind.SCALAR:
+        response_model: type[BaseModel] = _scalar_response_model(fn)
+        return_annotation: Any = response_model
+    else:
+        orm_class = base.classes.get(fn.return_table_name)
+        table: Table = orm_class.__table__
+        response_model = create_model(
+            f"{to_pascal(inflect.singular_noun(table.name))}Model",
+            __config__=ConfigDict(from_attributes=True),
+            **{
+                name: pydantic_field_from_column(column, "model")
+                for name, column in table.columns.items()
+                if pydantic_field_from_column(column, "model")[0]
+            },
+        )
+        return_annotation = list[response_model] if fn.return_kind == FunctionReturnKind.SET else response_model
+
+    fn_for_handler = fn
+
+    class FunctionController(litestar.Controller):
+        """Auto-generated controller wrapping a single STABLE/IMMUTABLE PG function."""
+
+        path = f"{settings.base_path}/{fn_for_handler.name}"
+        tags: ClassVar[list[str]] = [f"functions: {fn_for_handler.name}"]
+
+        @litestar.get(
+            summary=f"Call {fn_for_handler.name}",
+            description=description,
+            security=[{"BearerToken": []}],
+        )
+        async def call(  # type: ignore[no-redef]
+            self,
+            session: AsyncSession,
+            request: Request[auth.User, str, State],
+        ) -> return_annotation:  # type: ignore[valid-type]
+            """Invoke the underlying PostgreSQL function and return its result.
+
+            Args:
+                session: The active async SQLAlchemy session injected by DI.
+                request: The current HTTP request; query parameters carry the
+                    function arguments.
+
+            Returns:
+                For SCALAR returns: a ``{"value": <scalar>}`` JSON object.
+                For ROW returns: the matching Pydantic model instance, or 404
+                if the function returned no row.
+                For SET returns: a list of Pydantic model instances (possibly
+                empty).
+
+            Raises:
+                litestar.exceptions.ClientException: If a query parameter
+                    cannot be coerced to its declared Python type.
+                litestar.exceptions.NotFoundException: If a ROW return yields
+                    no row.
+            """
+            bind: dict[str, Any] = {}
+            for param in fn_for_handler.params:
+                raw = request.query_params.get(param.name)
+                if raw is None:
+                    if not param.has_default:
+                        raise ClientException(f"Missing required parameter {param.name!r}")
+                    continue
+                bind[param.name] = _coerce_query_param(raw, param.python_type)
+
+            sql = _build_function_sql(fn_for_handler, list(bind.keys()))
+            statement = text(sql).bindparams(**bind)
+
+            async with async_session() as call_session:
+                await set_role(call_session, request.user)
+                if fn_for_handler.return_kind == FunctionReturnKind.SCALAR:
+                    value = (await call_session.execute(statement)).scalar()
+                    return response_model.model_validate({"value": value})
+                if fn_for_handler.return_kind == FunctionReturnKind.SET:
+                    rows = (await call_session.execute(statement)).mappings().all()
+                    return [response_model.model_validate(dict(r)) for r in rows]
+                # ROW
+                row = (await call_session.execute(statement)).mappings().first()
+                if row is None:
+                    raise NotFoundException(f"Function {fn_for_handler.schema}.{fn_for_handler.name}() returned no row")
+                return response_model.model_validate(dict(row))
+
+    return FunctionController
+
+
+def build_function_controllers(introspection: Introspection) -> list[type[litestar.Controller]]:
+    """Build one Litestar controller per supported PG function in ``introspection``.
+
+    Skips a function (with a logged warning) if its REST path collides with
+    an already-registered table path or with another function path. The
+    table-driven path always wins.
+
+    Args:
+        introspection: The :class:`Introspection` returned by
+            :func:`fusionserve.persistence.introspect`.
+
+    Returns:
+        A list of dynamically constructed controller classes ready to be
+        mounted on the Litestar application.
+    """
+    controllers: list[type[litestar.Controller]] = []
+
+    table_paths = {f"{settings.base_path}/{name}" for name in introspection.base.classes}
+    for orm_class in introspection.base.classes:
+        for pk in orm_class.__table__.primary_key.columns:
+            table_paths.add(f"{settings.base_path}/{orm_class.__table__.name}/{{{pk}}}")
+    used_paths: set[str] = set()
+
+    for fn in introspection.functions:
+        path = f"{settings.base_path}/{fn.name}"
+        if path in table_paths or path in used_paths:
+            # TODO: collision-resolution strategy. Options under consideration:
+            #   * prefix function paths with ``/rpc`` or ``/fn``
+            #   * suffix with arity (impossible since overloads are pre-rejected)
+            #   * allow function to win when explicitly opted-in via smart-comment metadata
+            # For v1: existing table path wins, function is dropped.
+            _logger.warning(
+                "Skipping REST exposure of function %s.%s: path %s collides with an existing route.",
+                fn.schema,
+                fn.name,
+                path,
+            )
+            continue
+        controllers.append(create_function_controller(fn, introspection.base))
+        used_paths.add(path)
+    return controllers

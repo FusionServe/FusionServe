@@ -1,18 +1,27 @@
+import datetime
 import logging
-import re
+import uuid
+from collections import Counter
+from decimal import Decimal
 from typing import Any, Literal
 
 import inflect as _inflect
-import yaml
-from pydantic import Field
-from sqlalchemy import DDL, Column, MetaData, Select, Table, create_engine, func
+from pydantic import Field, TypeAdapter
+from sqlalchemy import DDL, Column, MetaData, Select, create_engine, func, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.ext.automap import AutomapBase, automap_base
+from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.orm import DeclarativeMeta, load_only
+from strawberry.scalars import JSON as StrawberryJSON
 
 from .auth import User
 from .config import settings
-from .models import SmartComment
+from .models import (
+    FunctionInfo,
+    FunctionSkip,
+    Introspection,
+    PgFunctionInfo,
+)
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -107,16 +116,21 @@ def pydantic_field_from_column(
     return (field_type, Field(default, description=column.comment))
 
 
-def introspect() -> AutomapBase:
-    """Reflect the configured PostgreSQL schema and return an automap ``Base``.
+def introspect() -> Introspection:
+    """Reflect the configured PostgreSQL schema and return its full description.
 
     Uses a synchronous psycopg engine because SQLAlchemy reflection requires
-    a sync dialect.  Also installs the ``current_user_id()`` SQL function in
-    the configured app schema (idempotently, on every startup).
+    a sync dialect. Performs three things in order on the same engine:
+
+    1. Installs the ``current_user_id()`` SQL function in
+       ``settings.pg_app_schema`` (idempotently, on every startup).
+    2. Reflects every table in that schema into a SQLAlchemy automap ``Base``.
+    3. Discovers ``STABLE`` / ``IMMUTABLE`` functions in that schema via
+       :func:`_introspect_functions` for the custom-query feature.
 
     Returns:
-        The SQLAlchemy automap ``Base`` whose ``.classes`` attribute maps
-        plural table names to ORM classes.
+        An :class:`~fusionserve.models.Introspection` bundling the automap
+        ``base`` with the list of supported ``functions``.
 
     Raises:
         ValueError: If any reflected table has a non-plural name.
@@ -142,7 +156,11 @@ def introspect() -> AutomapBase:
     for table in metadata.sorted_tables:
         if not inflect.singular_noun(table.name):
             raise ValueError(f"Table name {table.name} is not plural")
-    return Base
+
+    known_tables = {t.name for t in metadata.sorted_tables}
+    with _engine.connect() as connection:
+        functions = _introspect_functions(connection, schema, known_tables)
+    return Introspection(base=Base, functions=functions)
 
 
 async def set_role(session: AsyncSession, user: User | None):
@@ -165,45 +183,129 @@ async def set_role(session: AsyncSession, user: User | None):
     # select set_config('role', 'app_user', true), set_config('user_id', '2', true), ...
 
 
-# Compiled once at module level; reusing compiled objects avoids per-call overhead.
-_FRONTMATTER_PATTERN = re.compile(r"^---\s*$.*^---\s*$.*", re.MULTILINE | re.DOTALL)
-_FRONTMATTER_BOUNDARY = re.compile(r"^---\s*$", re.MULTILINE)
+#: Map of PostgreSQL ``pg_type.typname`` values to the Python / Strawberry
+#: types we expose them as in the GraphQL and REST surfaces. Functions whose
+#: arguments or return type are not in this map are skipped at introspection
+#: time with a logged warning. ``json`` / ``jsonb`` use Strawberry's built-in
+#: ``JSON`` scalar (lossless, arbitrary JSON) — only for function param /
+#: return types; column-level json/jsonb mapping stays with the upstream
+#: ``strawberry-sqlalchemy-mapper``.
+_PG_TO_PY: dict[str, type] = {
+    "int2": int,
+    "int4": int,
+    "int8": int,
+    "float4": float,
+    "float8": float,
+    "numeric": Decimal,
+    "text": str,
+    "varchar": str,
+    "bpchar": str,
+    "name": str,
+    "citext": str,
+    "bool": bool,
+    "uuid": uuid.UUID,
+    "date": datetime.date,
+    "time": datetime.time,
+    "timetz": datetime.time,
+    "timestamp": datetime.datetime,
+    "timestamptz": datetime.datetime,
+    "json": StrawberryJSON,
+    "jsonb": StrawberryJSON,
+}
 
 
-def parse_comments(obj: Table | Column) -> SmartComment:
-    """Parse a table or column comment, extracting optional YAML frontmatter.
+#: SQL projection driving custom-query introspection. Selects the columns
+#: required to populate :class:`~fusionserve.models.PgFunctionInfo` for every
+#: ordinary STABLE/IMMUTABLE function in the requested schema.
+_FUNCTIONS_SQL = text(
+    """
+    SELECT
+        p.oid,
+        p.proname,
+        p.provolatile,
+        p.proretset,
+        p.prokind,
+        p.proargnames,
+        p.proargmodes,
+        p.pronargs,
+        p.pronargdefaults,
+        COALESCE(
+            array(
+                SELECT t.typname
+                FROM unnest(p.proargtypes) WITH ORDINALITY AS u(oid, ord)
+                JOIN pg_type t ON t.oid = u.oid
+                ORDER BY u.ord
+            ),
+            ARRAY[]::text[]
+        ) AS arg_typnames,
+        rt.typname AS return_typname,
+        rt.typtype AS return_typtype,
+        rt.typrelid AS return_typrelid,
+        cl.relname AS return_relname,
+        d.description AS comment
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_type rt ON rt.oid = p.prorettype
+    LEFT JOIN pg_class cl ON cl.oid = rt.typrelid
+    LEFT JOIN pg_description d ON d.objoid = p.oid AND d.objsubid = 0
+    WHERE n.nspname = :schema
+      AND p.provolatile IN ('s', 'i')
+      AND p.prokind = 'f'
+    ORDER BY p.proname, p.oid
+    """
+)
 
-    Both :class:`sqlalchemy.Table` and :class:`sqlalchemy.Column` expose a
-    ``.comment`` attribute, so the same smart-comment parsing applies to
-    either. If the comment starts with a YAML frontmatter block delimited by
-    ``---`` markers, the metadata is parsed and returned alongside the
-    plain-text content. Any YAML parse error falls back to returning the
-    whole comment as plain-text content — no exception is raised (per the
-    parsing contract).
+
+def _introspect_functions(
+    connection: Connection,
+    schema: str,
+    known_tables: set[str],
+) -> list[FunctionInfo]:
+    """Discover STABLE / IMMUTABLE functions in ``schema`` and return their metadata.
+
+    Pure orchestration: load raw rows via :class:`PgFunctionInfo`, detect
+    overloads (skipped wholesale with a warning), and ask each row to project
+    itself into a :class:`FunctionInfo` via
+    :meth:`PgFunctionInfo.to_function_info`. Rows that cannot be projected
+    return a :class:`FunctionSkip` instead — the skip is logged here, not in
+    the model.
 
     Args:
-        obj: SQLAlchemy ``Table`` or ``Column`` whose ``comment`` attribute
-            is parsed.
+        connection: A live synchronous SQLAlchemy connection bound to the
+            target database.
+        schema: The PostgreSQL schema to look in (typically
+            ``settings.pg_app_schema``).
+        known_tables: Set of table names already reflected by automap; used
+            to validate row / set return types.
 
     Returns:
-        A :class:`~fusionserve.models.SmartComment` with optional ``metadata``
-        and ``content`` fields populated.
+        A list of :class:`~fusionserve.models.FunctionInfo` — one per
+        successfully introspected function.
     """
-    comment = obj.comment
-    if not comment:
-        return SmartComment()
+    pg_funcs = TypeAdapter(list[PgFunctionInfo]).validate_python(
+        connection.execute(_FUNCTIONS_SQL, {"schema": schema}).mappings().all()
+    )
 
-    if not _FRONTMATTER_PATTERN.fullmatch(comment):
-        return SmartComment(content=comment)
+    counts = Counter(p.proname for p in pg_funcs)
+    overloaded = {name for name, n in counts.items() if n > 1}
+    for name in sorted(overloaded):
+        _logger.warning(
+            "Skipping overloaded function %s.%s (multiple signatures defined; "
+            "expose a single canonical version to enable custom-query support).",
+            schema,
+            name,
+        )
 
-    _, frontmatter, content = _FRONTMATTER_BOUNDARY.split(comment, 2)
-
-    try:
-        metadata = yaml.safe_load(frontmatter)
-    except yaml.YAMLError:
-        return SmartComment(content=comment)
-
-    return SmartComment(metadata=metadata, content=content.lstrip("\n"))
+    functions: list[FunctionInfo] = []
+    for pg in pg_funcs:
+        if pg.proname in overloaded:
+            continue
+        outcome = pg.to_function_info(schema, known_tables, _PG_TO_PY)
+        if isinstance(outcome, FunctionSkip):
+            _logger.warning("Skipping function %s.%s: %s", schema, pg.proname, outcome.message)
+            continue
+        functions.append(outcome)
+    return functions
 
 
 def apply_load_only(statement: Select, table: DeclarativeMeta, selected_fields: list[str] | None):
