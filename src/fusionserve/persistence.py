@@ -8,7 +8,7 @@ from typing import Any, Literal
 import inflect as _inflect
 from pydantic import Field, TypeAdapter
 from sqlalchemy import DDL, Column, MetaData, Select, create_engine, func, text
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import URL, Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.orm import DeclarativeMeta, load_only
@@ -25,10 +25,17 @@ from .models import (
 
 _logger = logging.getLogger(settings.app_name)
 
+db_url = URL.create(
+    drivername="postgresql+asyncpg",
+    username=settings.pg_user,
+    password=settings.pg_password.get_secret_value(),
+    host=settings.pg_host,
+    port=settings.pg_port,
+    database=settings.pg_database,
+)
+
 engine = create_async_engine(
-    f"postgresql+asyncpg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
-    f"{settings.pg_host}:"
-    f"{settings.pg_port}/{settings.pg_database}",
+    db_url,
     echo=settings.echo_sql,
     pool_pre_ping=True,
 )
@@ -137,9 +144,7 @@ def introspect() -> Introspection:
     """
     # Introspection is only supported for sync engines.
     _engine = create_engine(
-        f"postgresql+psycopg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
-        f"{settings.pg_host}:"
-        f"{settings.pg_port}/{settings.pg_database}",
+        db_url.set(drivername="postgresql+psycopg"),
         echo=settings.echo_sql,
         pool_pre_ping=True,
     )

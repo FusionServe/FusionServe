@@ -124,7 +124,7 @@ def test_introspect_succeeds_against_live_db(configured_app):
     """``introspect()`` reflects the seeded schema and returns automap classes."""
     from fusionserve import persistence
 
-    base = persistence.introspect()
+    base = persistence.introspect().base
     assert "widgets" in base.classes
 
 
