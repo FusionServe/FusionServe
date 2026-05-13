@@ -45,7 +45,7 @@ dependencies = [
     "strawberry-graphql",
     "strawberry-sqlalchemy-mapper>=0.8.0",
     "typing-extensions",
-    "uvicorn[standard]>=0.41.0",
+    "uvicorn[standard]>=0.46.0",
 ]
 
 [build-system]
