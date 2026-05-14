@@ -10,7 +10,10 @@ tables as web APIs without manually writing endpoints.
 
 - **Automatic API Generation** — introspects your PostgreSQL schema and
   creates full CRUD endpoints.
-- **Dual API Support** — REST API with OpenAPI docs + GraphQL API.
+- **Dual API Support** — REST API + GraphQL API.
+- **Built-in admin UI** — modern React SPA (Vite + TanStack Router/Query
+  + Tailwind v4) mounted at `/api/`, embedding Scalar for OpenAPI
+  exploration and a GraphiQL link.
 - **OData-style Filtering** — advanced query filtering using OData syntax.
 - **Pagination** — built-in pagination with configurable page size.
 - **Role-based Security** — PostgreSQL role-based access control with
@@ -23,8 +26,11 @@ tables as web APIs without manually writing endpoints.
 ## Quick Start
 
 ```bash
-# Install
+# Install Python dependencies
 uv sync --all-groups
+
+# Build the bundled UI (requires bun: https://bun.sh)
+cd ui && bun install && bun run build && cd ..
 
 # Run with uvicorn
 uv run uvicorn fusionserve.main:app --reload --port 8001
@@ -33,6 +39,11 @@ uv run uvicorn fusionserve.main:app --reload --port 8001
 > The app is built on **Litestar**. The `[project.scripts]` entry has been
 > removed; do not run `uv run fusionserve` — invoke `uvicorn` (or `granian`
 > for production) against the ASGI app directly.
+
+> The bundled React UI ships inside the Python wheel at
+> `src/fusionserve/web/dist`. The Litestar app refuses to start in
+> non-dev mode if the SPA is not built; set `VITE_DEV_MODE=True` (and run
+> `bun run dev` in `ui/`) for one-port HMR development without a build.
 
 Or using Docker:
 
@@ -73,6 +84,9 @@ real `.env` — the repository's `.gitignore` excludes it.**
 | `jwt_issuer` | _(unset)_ | OIDC issuer URL; used for `iss` validation and JWKS discovery. |
 | `jwks_url` | _(unset)_ | Optional explicit JWKS endpoint (skips OIDC discovery). |
 | `client_id` | `app_name.lower()` | OAuth2 client id used to locate roles in the access token. |
+| `vite_dev_mode` | `False` | When `True`, the Litestar Vite plugin starts the bun-driven Vite dev server and proxies HMR through the ASGI port. |
+| `ui_path` | `/-/` | Public URL where the React SPA is mounted. `/api/` issues a 302 redirect here. |
+| `ui_assets_path` | `/-/assets/` | URL prefix for hashed Vite assets. Must stay outside `base_path` and match the `assetUrl` literal in `ui/vite.config.ts`. |
 
 ### Required PostgreSQL privileges
 
@@ -92,41 +106,61 @@ If you would rather manage the function out of band (e.g. through a
 migration tool), drop privileges accordingly and remove the DDL block
 from `persistence.introspect`.
 
+## Built-in UI
+
+The bundled React SPA is mounted by the Litestar Vite plugin at
+`settings.ui_path` (default `/-/`). Users typically arrive via a 302
+redirect from `/api/` to `settings.ui_path` issued by
+`fusionserve.ui.RedirectRenderPlugin`. Hashed JS/CSS chunks are
+emitted under `settings.ui_assets_path` (default `/-/assets/`) —
+deliberately *outside* `settings.base_path` so the OpenAPI router's
+not-found handler cannot shadow asset requests. The SPA iframes the
+backend's Swagger UI (`/api/swagger`) and GraphiQL IDE
+(`/api/graphql`) so the bundle stays small; the raw OpenAPI 3.1
+document at `/api/openapi.json` and the Scalar viewer at `/api/scalar`
+remain available for direct access. Client-side navigation uses hash
+routing (`/-/#/openapi`, `/-/#/graphql`, …) so the SPA router stays
+immune to any future top-level Litestar route.
+
 ## REST API
 
-Once running, the Scalar / Swagger documentation is at `/api/docs` and
-the OpenAPI document at `/api/openapi.json`.
+The OpenAPI document is served at `/api/openapi.json`. Two interactive
+viewers are also available out of the box: Swagger UI at `/api/swagger`
+and Scalar at `/api/scalar` (both backed by the same auto-generated
+schema). The React SPA at `settings.ui_path` iframes Swagger UI; the
+top-level `/api/` URL redirects there.
 
 ### Endpoints
 
-For each table (e.g. `users`):
+REST endpoints are versioned under `/api/v1/` to keep the URL surface
+forward-compatible. For each table (e.g. `users`):
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/api/users` | List records (filter / paginate). |
-| GET | `/api/users/{pk}` | Get one record by primary key. |
-| POST | `/api/users` | Create a record. |
-| PATCH | `/api/users/{pk}` | Update a record. |
-| DELETE | `/api/users/{pk}` | Delete a record. |
+| GET | `/api/v1/users` | List records (filter / paginate). |
+| GET | `/api/v1/users/{pk}` | Get one record by primary key. |
+| POST | `/api/v1/users` | Create a record. |
+| PATCH | `/api/v1/users/{pk}` | Update a record. |
+| DELETE | `/api/v1/users/{pk}` | Delete a record. |
 
 ### Query parameters
 
 **Pagination:**
 
 ```text
-GET /api/users?_limit=10&_offset=0
+GET /api/v1/users?_limit=10&_offset=0
 ```
 
 **Basic equality filtering:**
 
 ```text
-GET /api/users?status=active&role=admin
+GET /api/v1/users?status=active&role=admin
 ```
 
 **Advanced OData filtering:**
 
 ```text
-GET /api/users?_filter=(status eq 'active') and (age gt 18)
+GET /api/v1/users?_filter=(status eq 'active') and (age gt 18)
 ```
 
 Supported OData operators: `eq`, `ne`, `gt`, `ge`, `lt`, `le`, `and`,
@@ -159,10 +193,14 @@ src/fusionserve/
 ├── main.py        # Litestar application entry point
 ├── config.py      # Pydantic-settings configuration
 ├── persistence.py # Database introspection & engine setup
-├── rest.py        # REST API route generation
-├── graphql.py     # GraphQL schema generation
+├── rest.py        # REST API route generation (/api/v1/<table>)
+├── graphql.py     # GraphQL schema generation (/api/graphql)
+├── ui.py          # React SPA wiring + RedirectRenderPlugin
 ├── auth.py        # JWT verification and User model
 └── models.py      # Pydantic / Strawberry helper models
+
+ui/                # Bun + Vite + React + TS + Tailwind v4 SPA
+└── src/           # Built into ../src/fusionserve/web/dist
 ```
 
 ### How it works
@@ -182,7 +220,12 @@ src/fusionserve/
 
 | Path | Description |
 |---|---|
-| `/api/docs` | OpenAPI documentation (Swagger + Scalar). |
-| `/api/openapi.json` | OpenAPI specification. |
-| `/api/graphql` | GraphQL endpoint (with GraphiQL IDE). |
+| `/api/` | 302 redirect to the React UI at `settings.ui_path`. |
+| `/api/openapi.json` | OpenAPI specification (raw JSON). |
+| `/api/swagger` | Swagger UI. |
+| `/api/scalar` | Scalar API reference. |
+| `/api/v1/<table>` | REST CRUD endpoints generated from PostgreSQL introspection. |
+| `/api/graphql` | GraphQL endpoint (with GraphiQL IDE on `GET`). |
+| `/-/` (and `/-/{path}`) | React SPA (Litestar Vite SPA handler; configurable via `settings.ui_path`). |
+| `/-/assets/...` | Hashed UI assets emitted by Vite (configurable via `settings.ui_assets_path`). Must stay outside `base_path`. |
 | `/metrics` | Prometheus metrics. |

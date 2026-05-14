@@ -55,3 +55,10 @@ MANIFEST
 
 # Environment variables file
 .env
+
+# Frontend (bun + Vite) build artefacts
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/bun.lockb
+src/fusionserve/web/dist/

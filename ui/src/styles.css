@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+/*
+ * Tailwind v4 single-file import. Project-wide custom tokens go into
+ * ``@theme`` blocks below as the SPA grows.
+ */
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}

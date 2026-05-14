@@ -1,7 +1,35 @@
 # syntax=docker/dockerfile:1.7
 
 # ============================================================================
-# Stage 1 — Builder: resolve and install dependencies system-wide
+# Stage 1 — Frontend: build the React SPA with bun
+# ============================================================================
+# bun is the only supported JS runtime / package manager (see AGENTS.md).
+# The built artefacts land in ``/out/dist`` and are copied into the Python
+# package directory in the next stage so the wheel ships the SPA.
+FROM oven/bun:1.2-alpine AS frontend
+
+WORKDIR /ui
+
+# 1. Install JS dependencies in a cached layer keyed on package.json + lockfile.
+#    ``bun.lock`` is optional here: the very first Docker build in a fresh
+#    checkout will generate it, subsequent builds use ``--frozen-lockfile``
+#    once the lockfile has been committed alongside ``package.json``.
+COPY ui/package.json ./
+COPY ui/bun.lock* ./
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    if [ -f bun.lock ]; then \
+        bun install --frozen-lockfile; \
+    else \
+        bun install; \
+    fi
+
+# 2. Copy the rest of the frontend source and build.
+COPY ui/ ./
+RUN bun run build && \
+    mkdir -p /out && cp -R ../src/fusionserve/web/dist /out/dist
+
+# ============================================================================
+# Stage 2 — Builder: resolve and install Python dependencies system-wide
 # ============================================================================
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
 
@@ -25,14 +53,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv export --frozen --no-dev --no-emit-project --format requirements-txt -o /tmp/requirements.txt \
     && uv pip install --system --no-deps -r /tmp/requirements.txt
 
-# 2. Copy project source and install the project itself system-wide.
+# 2. Copy project source and the prebuilt SPA, then install the project
+#    itself system-wide. The SPA dist is staged under ``src/fusionserve/web/dist``
+#    so uv_build packages it into the wheel automatically.
 COPY pyproject.toml uv.lock README.md LICENSE.txt ./
 COPY src ./src
+COPY --from=frontend /out/dist ./src/fusionserve/web/dist
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-deps .
 
 # ============================================================================
-# Stage 2 — Runtime: minimal image with only the installed packages + assets
+# Stage 3 — Runtime: minimal image with only the installed packages + assets
 # ============================================================================
 FROM python:3.14-slim-bookworm AS runtime
 

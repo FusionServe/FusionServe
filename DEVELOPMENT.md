@@ -4,6 +4,12 @@
 
 - Python **3.14+**
 - [`uv`](https://docs.astral.sh/uv/) (package manager and project runner)
+- [`bun`](https://bun.sh) (JS runtime + package manager for the bundled UI)
+
+> The JS toolchain is **bun-only**. Do not run `npm`, `npx`, `pnpm` or
+> `yarn` inside `ui/` — install with `bun install`, run scripts with
+> `bun run …`, and commit `bun.lock` alongside any `package.json`
+> change. Same discipline as `uv.lock` on the Python side.
 
 ---
 
@@ -20,14 +26,57 @@ uv sync --all-groups
 ### Run the application
 
 ```bash
-uv run fusionserve
-```
-
-Or using uvicorn directly with hot-reload:
-
-```bash
 uv run uvicorn fusionserve.main:app --reload --port 8001
 ```
+
+> Do **not** run `uv run fusionserve` — the `[project.scripts]` entry
+> points at a non-existent module and only `ImportError`s.
+
+The Litestar Vite plugin in SPA mode loads the bundled `index.html` at
+startup. Either pre-build the SPA once with `bun run build` (in `ui/`),
+or set `VITE_DEV_MODE=True` and run the bun-driven Vite dev server in
+parallel — see the next section.
+
+### Frontend dev workflow
+
+```bash
+# One-time install
+cd ui
+bun install
+
+# Two-terminal dev workflow with HMR (one-port via litestar-vite proxy):
+#  - Terminal A: backend with VITE_DEV_MODE=True
+VITE_DEV_MODE=True uv run uvicorn fusionserve.main:app --reload --port 8001
+#  - Terminal B: bun-driven Vite dev server (proxied through the backend)
+cd ui && bun run dev
+
+# Production-style build (writes to ../src/fusionserve/web/dist):
+cd ui && bun run build
+
+# Type-check only:
+cd ui && bun run typecheck
+```
+
+### URL layout cheat-sheet
+
+| Path | Owner | Notes |
+|------|-------|-------|
+| `/api/` | `RedirectRenderPlugin` (`fusionserve.ui`) | 302 redirect to `settings.ui_path`. |
+| `/api/openapi.json` | Litestar OpenAPI router | Auto-registered JSON handler (no explicit `JsonRenderPlugin`; the upstream "fallback" path provides it). |
+| `/api/swagger` | `SwaggerRenderPlugin` | Swagger UI. |
+| `/api/scalar` | `ScalarRenderPlugin` | Scalar API reference. |
+| `/api/v1/<table>` | `fusionserve.rest` | Dynamically generated REST CRUD endpoints (`v1` is the API version). |
+| `/api/graphql` | `fusionserve.graphql` | Strawberry GraphQL endpoint + GraphiQL on `GET`. |
+| `/-/` (and `/-/{path}`) | `litestar-vite` SPA handler | React SPA index. Wired via `Settings.ui_path`. |
+| `/-/assets/...` | `litestar-vite` static router | Hashed JS/CSS chunks. Wired via `Settings.ui_assets_path`. |
+| `/metrics` | Litestar Prometheus | Standard Prometheus exposition. |
+
+The asset URL (`Settings.ui_assets_path`, default `/-/assets/`) lives
+at a top-level prefix outside `settings.base_path` so the OpenAPI
+router's auto-registered `<base_path>/{path:str}` not-found handler
+cannot shadow asset requests. The matching literal is hard-coded in
+`ui/vite.config.ts` (`assetUrl`); changing one without the other
+breaks asset serving.
 
 ### Run tests
 

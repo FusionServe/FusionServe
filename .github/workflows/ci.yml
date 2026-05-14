@@ -40,6 +40,33 @@ jobs:
       - name: Install project (with dev dependencies)
         run: uv sync --frozen
 
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2"
+
+      - name: Install JS dependencies
+        working-directory: ui
+        # ``bun install --frozen-lockfile`` is enabled once ``bun.lock`` is
+        # committed; until then the first CI run generates it on-the-fly.
+        run: |
+          if [ -f bun.lock ]; then
+            bun install --frozen-lockfile
+          else
+            bun install
+          fi
+
+      - name: Type-check UI
+        working-directory: ui
+        run: bun run typecheck
+
+      - name: Build UI
+        working-directory: ui
+        # Builds the SPA into ``src/fusionserve/web/dist`` so any future
+        # tests that import ``fusionserve.main`` (and therefore the
+        # VitePlugin manifest) pick up real assets.
+        run: bun run build
+
       - name: Ruff — lint
         run: uv run ruff check .
 
