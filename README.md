@@ -84,6 +84,7 @@ real `.env` — the repository's `.gitignore` excludes it.**
 | `jwt_issuer` | _(unset)_ | OIDC issuer URL; used for `iss` validation and JWKS discovery. |
 | `jwks_url` | _(unset)_ | Optional explicit JWKS endpoint (skips OIDC discovery). |
 | `client_id` | `app_name.lower()` | OAuth2 client id used to locate roles in the access token. |
+| `ui_enabled` | `True` | When `False`, disables the integrated UI and the Openapi render plugins. |
 | `vite_dev_mode` | `False` | When `True`, the Litestar Vite plugin starts the bun-driven Vite dev server and proxies HMR through the ASGI port. |
 | `ui_path` | `/-/` | Public URL where the React SPA is mounted. `/api/` issues a 302 redirect here. |
 | `ui_assets_path` | `/-/assets/` | URL prefix for hashed Vite assets. Must stay outside `base_path` and match the `assetUrl` literal in `ui/vite.config.ts`. |

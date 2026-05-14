@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     debug: bool = False
     base_path: str = "/api"
 
+    ui_enabled: bool = True
     # ---- UI / Vite ----
     #: When ``True``, the Litestar Vite plugin starts the Vite dev server
     #: (one-port HMR proxy through Litestar). Leave ``False`` in production —

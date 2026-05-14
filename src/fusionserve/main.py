@@ -9,7 +9,7 @@ from litestar.connection import ASGIConnection
 from litestar.di import Provide
 from litestar.middleware import AbstractAuthenticationMiddleware, AuthenticationResult, DefineMiddleware
 from litestar.openapi import OpenAPIConfig
-from litestar.openapi.plugins import ScalarRenderPlugin, SwaggerRenderPlugin
+from litestar.openapi.plugins import JsonRenderPlugin, ScalarRenderPlugin, SwaggerRenderPlugin
 from litestar.openapi.spec import Components, SecurityScheme
 from litestar.plugins.prometheus import PrometheusConfig, PrometheusController
 
@@ -60,17 +60,18 @@ auth_mw = DefineMiddleware(
     exclude=["/metrics", "/api/openapi.json"],
 )
 
+
 app = Litestar(
     route_handlers=[PrometheusController],
     lifespan=[lifespan],
     debug=settings.debug,
-    plugins=[ui.build_vite_plugin()],
+    plugins=[ui.build_vite_plugin()] if settings.ui_enabled else [],
     openapi_config=OpenAPIConfig(
         title=settings.app_name,
         version="1.0.0",
         path=f"{settings.base_path}",
         render_plugins=[
-            ui.RedirectRenderPlugin(),
+            ui.RedirectRenderPlugin() if settings.ui_enabled else None,
             SwaggerRenderPlugin(),
             ScalarRenderPlugin(
                 options={
@@ -79,7 +80,9 @@ app = Litestar(
                     "darkMode": True,
                 }
             ),
-        ],
+        ]
+        if settings.ui_enabled
+        else [JsonRenderPlugin()],
         components=Components(
             security_schemes={
                 "BearerToken": SecurityScheme(
