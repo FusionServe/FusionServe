@@ -189,7 +189,7 @@ def build_vite_plugin() -> VitePlugin:
                 static_dir=_STATIC_DIR,
                 asset_url=settings.ui_assets_path,
             ),
-            runtime=RuntimeConfig(executor="bun", is_react=True),
+            runtime=RuntimeConfig(executor="bun", is_react=True, set_environment=settings.vite_dev_mode),
         ),
     )
 

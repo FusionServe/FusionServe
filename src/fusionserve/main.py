@@ -14,7 +14,7 @@ from litestar.openapi.spec import Components, SecurityScheme
 from litestar.plugins.prometheus import PrometheusConfig, PrometheusController
 
 from . import auth, graphql, rest, ui
-from .config import settings
+from .config import get_config, settings
 from .persistence import get_async_session, introspect
 
 _logger = logging.getLogger(settings.app_name)
@@ -62,7 +62,7 @@ auth_mw = DefineMiddleware(
 
 
 app = Litestar(
-    route_handlers=[PrometheusController],
+    route_handlers=[PrometheusController, get_config],
     lifespan=[lifespan],
     debug=settings.debug,
     plugins=[ui.build_vite_plugin()] if settings.ui_enabled else [],
@@ -71,7 +71,7 @@ app = Litestar(
         version="1.0.0",
         path=f"{settings.base_path}",
         render_plugins=[
-            ui.RedirectRenderPlugin() if settings.ui_enabled else None,
+            ui.RedirectRenderPlugin(),
             SwaggerRenderPlugin(),
             ScalarRenderPlugin(
                 options={

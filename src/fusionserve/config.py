@@ -1,3 +1,6 @@
+from litestar import get
+from litestar.dto import DTOConfig
+from litestar.plugins.pydantic import PydanticDTO
 from pydantic import BaseModel, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -80,3 +83,21 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# Client configuration endpoint <base_path>/config.json
+class ConfigDTO(PydanticDTO[Settings]):
+    config = DTOConfig(
+        include={
+            "jwt_issuer",
+            "jwks_url",
+            "client_id",
+        }
+    )
+
+
+@get(f"{settings.base_path.rstrip('/')}/config.json", dto=ConfigDTO)
+async def get_config() -> Settings:
+    """Expose a subset of the server configuration to the client.
+    This is consumed by the client apps to configure the itself."""
+    return settings
