@@ -164,7 +164,7 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
         :class:`sqlalchemy.ext.asyncio.AsyncSession`.
         """
 
-        path = f"{settings.base_path}/{table_name}"
+        path = f"{settings.base_path}/v1/{table_name}"
         dependencies = create_filter_dependencies(
             {
                 "pagination_type": "limit_offset",
@@ -538,7 +538,7 @@ def create_function_controller(
 ) -> type[litestar.Controller]:
     """Dynamically create a Litestar Controller for one custom-query function.
 
-    Mounts ``GET {settings.base_path}/{fn.name}``. Arguments are read from the
+    Mounts ``GET {settings.base_path}/v1/{fn.name}``. Arguments are read from the
     query string and coerced to the declared Python type per
     :func:`_coerce_query_param`. The handler:
 
@@ -582,7 +582,7 @@ def create_function_controller(
     class FunctionController(litestar.Controller):
         """Auto-generated controller wrapping a single STABLE/IMMUTABLE PG function."""
 
-        path = f"{settings.base_path}/{fn_for_handler.name}"
+        path = f"{settings.base_path}/v1/{fn_for_handler.name}"
         tags: ClassVar[list[str]] = [f"functions: {fn_for_handler.name}"]
 
         @litestar.get(
@@ -661,14 +661,17 @@ def build_function_controllers(introspection: Introspection) -> list[type[litest
     """
     controllers: list[type[litestar.Controller]] = []
 
-    table_paths = {f"{settings.base_path}/{name}" for name in introspection.base.classes}
+    table_paths = {f"{settings.base_path}/v1/{name}" for name in introspection.base.classes}
+    # Also reserve the per-pk paths so a function named identically to
+    # ``/{pk}`` (after slug-collapsing) cannot collide with a row-detail
+    # endpoint. The set is consulted by the collision check below.
     for orm_class in introspection.base.classes:
         for pk in orm_class.__table__.primary_key.columns:
-            table_paths.add(f"{settings.base_path}/{orm_class.__table__.name}/{{{pk}}}")
+            table_paths.add(f"{settings.base_path}/v1/{orm_class.__table__.name}/{{{pk}}}")
     used_paths: set[str] = set()
 
     for fn in introspection.functions:
-        path = f"{settings.base_path}/{fn.name}"
+        path = f"{settings.base_path}/v1/{fn.name}"
         if path in table_paths or path in used_paths:
             # TODO: collision-resolution strategy. Options under consideration:
             #   * prefix function paths with ``/rpc`` or ``/fn``

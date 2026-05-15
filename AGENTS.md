@@ -11,6 +11,11 @@ or get wrong.
   Do **not** use `pip` / `poetry` / `venv` directly.
 - Bootstrap: `uv sync --all-groups` (dev group is needed for ruff, pytest,
   pre-commit, mkdocs tooling).
+- The bundled SPA under `ui/` uses **bun** exclusively. Do **not** run
+  `npm` / `npx` / `pnpm` / `yarn` inside `ui/`. Install with
+  `bun install`, run scripts with `bun run …`, and commit `bun.lock`
+  (text format) alongside any `package.json` change. The legacy binary
+  `bun.lockb` is gitignored.
 
 ## Commands CI enforces (run in this order)
 
@@ -86,6 +91,61 @@ process will not come up without the database.
 - `update_many` / `delete_many` intentionally raise `ValueError` when the
   resolved `where` condition is `None` (empty filter), to block accidental
   table-wide writes. Don't "fix" this by defaulting to no-op.
+- The bundled React SPA is wired through `litestar_vite.VitePlugin`
+  in `src/fusionserve/ui.py` (`build_vite_plugin`). The plugin is
+  configured with `mode="spa"`, `spa_path=settings.ui_path`,
+  `asset_url=settings.ui_assets_path`, and
+  `bundle_dir=src/fusionserve/web/dist` so the wheel ships built assets.
+  The SPA handler registers `<ui_path>/` and `<ui_path>/{path:path}`
+  routes, so any deep URL under `ui_path` resolves to `index.html`.
+- Users land on the SPA via a 302 redirect from `settings.base_path`
+  (`/api/`) issued by `fusionserve.ui.RedirectRenderPlugin`. That
+  plugin is registered as the first entry of
+  `OpenAPIConfig.render_plugins`, becoming the default plugin; the
+  upstream OpenAPI router auto-mounts it at its router root. The plugin
+  returns a `litestar.response.Redirect` from `render()` despite the
+  upstream `-> bytes` annotation — Litestar honours `Response` returns
+  regardless of the declared type.
+- Asset URL (`Settings.ui_assets_path`, default `/-/assets/`) MUST stay
+  outside `Settings.base_path`: the OpenAPI router mounted at
+  `base_path` auto-registers a `<base_path>/{path:str}` not-found
+  handler that would otherwise shadow asset requests. The same literal
+  is hard-coded in `ui/vite.config.ts` (`assetUrl`); the Python and JS
+  sides must match. Guardrail: `tests/test_ui.py` asserts the asset
+  URL stays outside `base_path`.
+- `Settings.ui_path` (default `/-/`) is both the SPA mount path
+  (passed as `spa_path` to `ViteConfig`) and the target of the `/api/`
+  -> SPA redirect. If you ever need to expose it to the JS toolchain
+  (HMR proxy URL resolution, production HTML transformer asset-path
+  rewriting), set `base_url=settings.ui_path` on the `ViteConfig` so
+  the plugin propagates it as `VITE_BASE_URL`.
+- In non-dev mode (`vite_dev_mode=False`) Litestar refuses to start
+  without a built `index.html` — run `bun run build` in `ui/` (or set
+  `VITE_DEV_MODE=True` and `bun run dev`) before invoking uvicorn.
+- REST endpoints are versioned under `<base_path>/v1/<table>` (default
+  `/api/v1/<table>`); the same `v1` prefix applies to PG-function
+  controllers. The version segment is hard-coded in `fusionserve.rest`;
+  bump via a single grep when introducing a `/v2`.
+- The SPA uses **hash routing** (`createHashHistory`) so client-side
+  paths (`/-/#/openapi`, `/-/#/graphql`, …) cannot collide with any
+  future top-level Litestar route. Browser history would also work
+  given the current layout, but hash routing is one fewer thing to
+  reason about.
+- The canonical OpenAPI document lives at `/api/openapi.json`,
+  auto-registered by Litestar's upstream OpenAPI router: none of the
+  configured `render_plugins` (Redirect / Swagger / Scalar) claims that
+  path, so the upstream "if no plugin registered openapi.json, add the
+  JsonRenderPlugin fallback" branch in `litestar/_openapi/plugin.py`
+  fires. If you ever want to override the media type or behaviour,
+  prepend an explicit `JsonRenderPlugin` to `render_plugins` in
+  `main.py`.
+- There is no `/api/_meta` endpoint. The SPA used to fetch a runtime
+  introspection catalogue from there; that machinery was removed when
+  the UI scope shrank to "redirect → SPA shell that iframes the
+  backend-served Swagger UI (`/api/swagger`) and GraphiQL
+  (`/api/graphql`) viewers". Future data-fetching features should
+  reintroduce a dedicated endpoint (avoid resurrecting the deleted
+  `MetaResponse` shape verbatim).
 
 ## Style & conventions
 
@@ -102,14 +162,19 @@ process will not come up without the database.
 
 ## Tests
 
-- `tests/` currently only has a smoke test (`test_skeleton.py`) asserting the
-  package exposes `__version__`. There is no test DB, no fixtures for
-  introspection, no integration coverage. When adding features, assume you
-  are writing the first real test of that area — don't expect helpers.
-- `pytest` runs without a database because nothing in the test suite imports
-  `main` (which triggers introspection). If you add tests that touch `main`,
-  `rest.build`, or `graphql.build`, you will need to stand up a PG instance
-  or mock the introspection boundary.
+- `tests/` currently has unit coverage for `auth`, `persistence`,
+  `graphql_helpers`, and `ui` (the new `/api/_meta` projector), plus a
+  smoke test (`test_skeleton.py`) that just checks `__version__`. Real
+  integration tests live in `test_integration_introspection.py` behind the
+  `integration` mark and are gated on `RUN_INTEGRATION=1` (CI keeps the
+  job disabled with `if: false`). When adding features, mirror the
+  existing pattern: prefer unit tests against pure helpers and mock the
+  introspection boundary.
+- `pytest` runs without a database because nothing in the unit suite
+  imports `main` (which triggers introspection). If you add tests that
+  touch `main`, `rest.build`, or `graphql.build`, you will need to stand
+  up a PG instance via `testcontainers` (already a dev dependency) or
+  mock the introspection boundary.
 
 ## Docs
 

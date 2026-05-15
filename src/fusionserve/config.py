@@ -34,6 +34,30 @@ class Settings(BaseSettings):
     debug: bool = False
     base_path: str = "/api"
 
+    ui_enabled: bool = True
+    # ---- UI / Vite ----
+    #: When ``True``, the Litestar Vite plugin starts the Vite dev server
+    #: (one-port HMR proxy through Litestar). Leave ``False`` in production —
+    #: the SPA is served from prebuilt assets in ``src/fusionserve/web/dist``.
+    vite_dev_mode: bool = False
+
+    #: Public URL where the React SPA lives. The OpenAPI router root at
+    #: ``base_path`` issues a 302 redirect here (see
+    #: :class:`fusionserve.ui.RedirectRenderPlugin`); the SPA itself is
+    #: served by ``litestar-vite``'s root catch-all so any unmatched path
+    #: resolves to ``index.html``. Surfaced to Vite as ``VITE_BASE_URL``
+    #: so the dev-mode proxy and the production HTML transformer resolve
+    #: asset paths against the right URL space.
+    ui_path: str = "/-/"
+
+    #: URL prefix for hashed JS/CSS chunks emitted by Vite. Must stay
+    #: **outside** :attr:`base_path` — the OpenAPI router mounted at
+    #: ``base_path`` auto-registers a ``<base_path>/{path:str}`` not-found
+    #: handler that would otherwise shadow asset requests. The matching
+    #: literal lives in ``ui/vite.config.ts`` (``assetUrl``); the Python
+    #: and JS sides must be kept in sync.
+    ui_assets_path: str = "/-/assets/"
+
     jwt_issuer: str | None = None
     jwks_url: str | None = None
     client_id: str | None = app_name.lower()
