@@ -8,7 +8,7 @@
 # resolved by corepack at build time. The built artefacts land in
 # ``/out/dist`` and are copied into the Python package directory in the
 # next stage so the wheel ships the SPA.
-FROM docker.io/library/node:20-alpine AS frontend
+FROM docker.io/library/node:24-alpine AS frontend
 
 # corepack ships with Node and reads the ``packageManager`` field from
 # ``package.json`` to activate the pinned pnpm version on first
