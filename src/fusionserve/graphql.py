@@ -1223,6 +1223,6 @@ def build(introspection: Introspection):
         path=f"{settings.base_path}/graphql",
         context_getter=custom_context_getter,
         allow_queries_via_get=False,
-        graphql_ide="graphiql",
+        graphql_ide="graphiql" if settings.ui_enabled else None,
         keep_alive=True,
     )

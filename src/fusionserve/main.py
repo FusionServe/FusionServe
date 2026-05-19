@@ -52,20 +52,25 @@ class AuthMiddleware(AbstractAuthenticationMiddleware):
         )
 
 
-# Auth-middleware exclusions: ``/metrics`` and the OpenAPI surfaces
-# Static UI assets carry ``opt={"exclude_from_auth":True}``
-# from the Vite plugin, so they're skipped automatically.
+# Auth-middleware exclusions: ``/metrics`` and the OpenAPI surfaces.
+# The static UI router built by ``ui.build_spa_route_handler`` carries
+# ``opt={"exclude_from_auth": True}`` so the middleware skips it via
+# its ``exclude_opt_key`` mechanism — no URL patterns required here.
 auth_mw = DefineMiddleware(
     AuthMiddleware,
     exclude=["/metrics", "/api/openapi.json"],
 )
 
 
+route_handlers = [PrometheusController, get_config]
+if settings.ui_enabled:
+    route_handlers.append(ui.build_spa_route_handler())
+
+
 app = Litestar(
-    route_handlers=[PrometheusController, get_config],
+    route_handlers=route_handlers,
     lifespan=[lifespan],
     debug=settings.debug,
-    plugins=[ui.build_vite_plugin()] if settings.ui_enabled else [],
     openapi_config=OpenAPIConfig(
         title=settings.app_name,
         version="1.0.0",

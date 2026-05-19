@@ -11,11 +11,13 @@ or get wrong.
   Do **not** use `pip` / `poetry` / `venv` directly.
 - Bootstrap: `uv sync --all-groups` (dev group is needed for ruff, pytest,
   pre-commit, mkdocs tooling).
-- The bundled SPA under `ui/` uses **bun** exclusively. Do **not** run
-  `npm` / `npx` / `pnpm` / `yarn` inside `ui/`. Install with
-  `bun install`, run scripts with `bun run …`, and commit `bun.lock`
-  (text format) alongside any `package.json` change. The legacy binary
-  `bun.lockb` is gitignored.
+- The bundled SPA under `ui/` uses **pnpm** exclusively. Do **not**
+  run `npm` / `npx` / `bun` / `bunx` / `yarn` inside `ui/`. The pnpm
+  version is pinned via the `packageManager` field in
+  `ui/package.json` and resolved by corepack (`corepack enable` then
+  any `pnpm …` invocation downloads the pinned version on first use).
+  Install with `pnpm install`, run scripts with `pnpm run …`, and
+  commit `pnpm-lock.yaml` alongside any `package.json` change.
 
 ## Commands CI enforces (run in this order)
 
@@ -91,13 +93,22 @@ process will not come up without the database.
 - `update_many` / `delete_many` intentionally raise `ValueError` when the
   resolved `where` condition is `None` (empty filter), to block accidental
   table-wide writes. Don't "fix" this by defaulting to no-op.
-- The bundled React SPA is wired through `litestar_vite.VitePlugin`
-  in `src/fusionserve/ui.py` (`build_vite_plugin`). The plugin is
-  configured with `mode="spa"`, `spa_path=settings.ui_path`,
-  `asset_url=settings.ui_assets_path`, and
-  `bundle_dir=src/fusionserve/web/dist` so the wheel ships built assets.
-  The SPA handler registers `<ui_path>/` and `<ui_path>/{path:path}`
-  routes, so any deep URL under `ui_path` resolves to `index.html`.
+- The bundled React SPA is served by a single Litestar static-files
+  router, wired in `src/fusionserve/ui.py` (`build_spa_route_handler`).
+  The router reads from `src/fusionserve/web/dist` (so the wheel ships
+  built assets), mounts at `Settings.ui_path`, uses `html_mode=True`
+  (serves `index.html` at the mount root and as a fallback for
+  unmatched paths), and carries `opt={"exclude_from_auth": True}` so
+  the auth middleware skips it via its `exclude_opt_key` mechanism —
+  do not add the static URL patterns to `auth_mw.exclude`.
+- There is no separate asset URL setting. Vite is configured with
+  `base: "./"` for builds (see `ui/vite.config.ts`) so the emitted
+  `index.html` references chunks via relative URLs (`./assets/...`).
+  The browser resolves those against the served SPA URL, giving
+  `<ui_path>/assets/<hash>.<ext>`; the same static-files router serves
+  them from `dist/assets/<hash>.<ext>`. This makes the SPA
+  location-independent — relocating it is a one-setting change
+  (`UI_PATH=…`), no JS rebuild required.
 - Users land on the SPA via a 302 redirect from `settings.base_path`
   (`/api/`) issued by `fusionserve.ui.RedirectRenderPlugin`. That
   plugin is registered as the first entry of
@@ -106,22 +117,25 @@ process will not come up without the database.
   returns a `litestar.response.Redirect` from `render()` despite the
   upstream `-> bytes` annotation — Litestar honours `Response` returns
   regardless of the declared type.
-- Asset URL (`Settings.ui_assets_path`, default `/-/assets/`) MUST stay
-  outside `Settings.base_path`: the OpenAPI router mounted at
-  `base_path` auto-registers a `<base_path>/{path:str}` not-found
-  handler that would otherwise shadow asset requests. The same literal
-  is hard-coded in `ui/vite.config.ts` (`assetUrl`); the Python and JS
-  sides must match. Guardrail: `tests/test_ui.py` asserts the asset
-  URL stays outside `base_path`.
-- `Settings.ui_path` (default `/-/`) is both the SPA mount path
-  (passed as `spa_path` to `ViteConfig`) and the target of the `/api/`
-  -> SPA redirect. If you ever need to expose it to the JS toolchain
-  (HMR proxy URL resolution, production HTML transformer asset-path
-  rewriting), set `base_url=settings.ui_path` on the `ViteConfig` so
-  the plugin propagates it as `VITE_BASE_URL`.
-- In non-dev mode (`vite_dev_mode=False`) Litestar refuses to start
-  without a built `index.html` — run `bun run build` in `ui/` (or set
-  `VITE_DEV_MODE=True` and `bun run dev`) before invoking uvicorn.
+- `Settings.ui_path` derives from `Settings.base_path` via the
+  `_derive_ui_path` `model_validator(mode="after")` in
+  `fusionserve.config`: the default is sentinel `""`, which the
+  validator fills with `f"{base_path.rstrip('/')}/-/"` (i.e. `/api/-/`
+  for the default `base_path`). Setting `UI_PATH=…` explicitly skips
+  the branch. The trailing-slash form is canonical — `<base_path>/-`
+  (no slash, single segment) is matched by the OpenAPI router's
+  `<base_path>/{path:str}` not-found handler and 404s; the
+  `<base_path>/` -> `<ui_path>` redirect emits the slash so users on
+  the normal entry path see the SPA.
+- The static-files router does **not** require `index.html` to exist
+  at startup — it 404s at request time if the file is missing. Run
+  `pnpm run build` in `ui/` to populate `src/fusionserve/web/dist`
+  before serving the SPA in production. Frontend development uses a
+  standalone Vite dev server: `pnpm run dev` in `ui/` starts it at
+  `http://localhost:5173/` with `server.proxy` forwarding `/api/*`
+  requests to the Litestar backend on `:8001` (target hard-coded in
+  `ui/vite.config.ts`). Guardrail: `tests/test_ui.py` pins the
+  one-router-at-`ui_path` + `exclude_from_auth=True` shape.
 - REST endpoints are versioned under `<base_path>/v1/<table>` (default
   `/api/v1/<table>`); the same `v1` prefix applies to PG-function
   controllers. The version segment is hard-coded in `fusionserve.rest`;

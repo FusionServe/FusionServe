@@ -2,11 +2,3 @@ node_modules/
 dist/
 .vite/
 *.tsbuildinfo
-
-# Bridge file written at runtime by ``litestar-vite`` during the Python
-# app lifespan. Regenerated on every startup; never source-controlled.
-.litestar.json
-
-# bun
-.bun/
-bun.lockb

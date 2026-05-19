@@ -1,31 +1,32 @@
 # syntax=docker/dockerfile:1.7
 
 # ============================================================================
-# Stage 1 — Frontend: build the React SPA with bun
+# Stage 1 — Frontend: build the React SPA with pnpm
 # ============================================================================
-# bun is the only supported JS runtime / package manager (see AGENTS.md).
-# The built artefacts land in ``/out/dist`` and are copied into the Python
-# package directory in the next stage so the wheel ships the SPA.
-FROM oven/bun:1.2-alpine AS frontend
+# pnpm is the only supported JS package manager (see AGENTS.md). The pnpm
+# version is pinned via ``packageManager`` in ``ui/package.json`` and
+# resolved by corepack at build time. The built artefacts land in
+# ``/out/dist`` and are copied into the Python package directory in the
+# next stage so the wheel ships the SPA.
+FROM docker.io/library/node:20-alpine AS frontend
+
+# corepack ships with Node and reads the ``packageManager`` field from
+# ``package.json`` to activate the pinned pnpm version on first
+# invocation. No global ``npm i -g pnpm`` needed.
+RUN corepack enable
 
 WORKDIR /ui
 
-# 1. Install JS dependencies in a cached layer keyed on package.json + lockfile.
-#    ``bun.lock`` is optional here: the very first Docker build in a fresh
-#    checkout will generate it, subsequent builds use ``--frozen-lockfile``
-#    once the lockfile has been committed alongside ``package.json``.
-COPY ui/package.json ./
-COPY ui/bun.lock* ./
-RUN --mount=type=cache,target=/root/.bun/install/cache \
-    if [ -f bun.lock ]; then \
-        bun install --frozen-lockfile; \
-    else \
-        bun install; \
-    fi
+# 1. Install JS dependencies in a cached layer keyed on package.json +
+#    pnpm-lock.yaml. The lockfile is committed to the repository, so the
+#    install is unconditional and reproducible.
+COPY ui/package.json ui/pnpm-lock.yaml ./
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
 
 # 2. Copy the rest of the frontend source and build.
 COPY ui/ ./
-RUN bun run build && \
+RUN pnpm run build && \
     mkdir -p /out && cp -R ../src/fusionserve/web/dist /out/dist
 
 # ============================================================================

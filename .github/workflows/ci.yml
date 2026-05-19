@@ -40,32 +40,38 @@ jobs:
       - name: Install project (with dev dependencies)
         run: uv sync --frozen
 
-      - name: Install bun
-        uses: oven-sh/setup-bun@v2
+      - name: Set up pnpm
+        # ``pnpm/action-setup`` reads the ``packageManager`` field from
+        # ``ui/package.json`` to install the pinned pnpm version, so the
+        # version is governed by a single source of truth.
+        uses: pnpm/action-setup@v4
         with:
-          bun-version: "1.2"
+          package_json_file: ui/package.json
+
+      - name: Set up Node
+        # Cache the pnpm store keyed on the committed lockfile; pnpm
+        # must already be on PATH (above) for setup-node to resolve the
+        # store path.
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
 
       - name: Install JS dependencies
         working-directory: ui
-        # ``bun install --frozen-lockfile`` is enabled once ``bun.lock`` is
-        # committed; until then the first CI run generates it on-the-fly.
-        run: |
-          if [ -f bun.lock ]; then
-            bun install --frozen-lockfile
-          else
-            bun install
-          fi
+        run: pnpm install --frozen-lockfile
 
       - name: Type-check UI
         working-directory: ui
-        run: bun run typecheck
+        run: pnpm run typecheck
 
       - name: Build UI
         working-directory: ui
         # Builds the SPA into ``src/fusionserve/web/dist`` so any future
-        # tests that import ``fusionserve.main`` (and therefore the
-        # VitePlugin manifest) pick up real assets.
-        run: bun run build
+        # tests that touch ``fusionserve.main`` (and therefore the
+        # static-files routers serving the SPA) see real assets.
+        run: pnpm run build
 
       - name: Ruff — lint
         run: uv run ruff check .

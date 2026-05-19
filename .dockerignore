@@ -63,8 +63,8 @@ scripts
 tests
 DEVELOPMENT.md
 
-# Frontend (bun) — never copy node_modules or built dist into the build
-# context; the Dockerfile rebuilds the SPA in its own stage.
+# Frontend (pnpm + Vite) — never copy node_modules or built dist into
+# the build context; the Dockerfile rebuilds the SPA in its own stage.
 ui/node_modules
 ui/dist
 src/fusionserve/web/dist

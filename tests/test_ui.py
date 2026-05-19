@@ -1,34 +1,43 @@
 """Unit tests for ``fusionserve.ui``.
 
 The module surface is intentionally tiny — a :class:`RedirectRenderPlugin`
-that diverts ``/api/`` traffic to the React SPA, plus a
-:func:`build_vite_plugin` factory. The test below pins the placement of
-the Vite asset prefix so a future refactor cannot accidentally move it
-inside ``settings.base_path`` (which would let the OpenAPI router shadow
-asset requests).
+that diverts ``<base_path>/`` traffic to the React SPA, plus a
+:func:`build_spa_route_handler` factory that returns the static-files
+router serving the SPA bundle. The tests below pin the router-shape
+invariants a future refactor must not silently break.
 """
 
 from __future__ import annotations
 
 from fusionserve.config import settings
-from fusionserve.ui import build_vite_plugin
+from fusionserve.ui import build_spa_route_handler
 
 
-def test_build_vite_plugin_uses_configured_asset_url():
-    """The Vite plugin must serve assets outside ``settings.base_path``.
+def _normalize(path: str) -> str:
+    """Strip trailing slashes the way Litestar's ``Router`` does."""
+    return path.rstrip("/") or "/"
 
-    The OpenAPI router (mounted at ``settings.base_path``) registers a
-    not-found handler at ``<base_path>/{path:str}`` plus an auto-generated
-    ``<base_path>/openapi.json`` handler; any asset URL that lives under
-    ``base_path`` is therefore at risk of being shadowed by one of those.
-    The asset URL is wired through :attr:`Settings.ui_assets_path` and
-    must remain a sibling top-level prefix.
+
+def test_build_spa_route_handler_mounts_at_ui_path():
+    """The static-files router must be mounted at ``settings.ui_path``.
+
+    Vite is configured to emit relative asset URLs (``./assets/...``)
+    so the chunks are served by the same router from
+    ``<ui_path>/assets/...`` — no separate asset router exists.
     """
-    plugin = build_vite_plugin()
+    router = build_spa_route_handler()
+    assert _normalize(router.path) == _normalize(settings.ui_path)
 
-    # PathConfig.__post_init__ auto-appends a trailing slash when the
-    # configured value doesn't already end with one. Mirror that here so
-    # the assertion doesn't break the day someone normalises the default.
-    expected = settings.ui_assets_path.rstrip("/") + "/"
-    assert plugin.config.asset_url == expected
-    assert not plugin.config.asset_url.startswith(settings.base_path.rstrip("/") + "/")
+
+def test_spa_router_is_excluded_from_auth():
+    """The static router must opt out of auth via the ``exclude_from_auth`` key.
+
+    The auth middleware (configured in :mod:`fusionserve.main`) honours
+    Litestar's ``exclude_opt_key`` mechanism, so any handler / router
+    carrying ``opt={"exclude_from_auth": True}`` is skipped without
+    needing the URL pattern added to the middleware's ``exclude``
+    list. Losing the opt would silently re-enable auth on every static
+    asset.
+    """
+    router = build_spa_route_handler()
+    assert router.opt.get("exclude_from_auth") is True, f"router at {router.path!r} missing exclude_from_auth opt"

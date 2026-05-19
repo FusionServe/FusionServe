@@ -2,7 +2,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import litestar from "litestar-vite-plugin";
 import { defineConfig } from "vite";
 
 // FusionServe SPA build configuration.
@@ -11,51 +10,59 @@ import { defineConfig } from "vite";
 // Python wheel (which packages everything under ``src/fusionserve/``)
 // ships the SPA without extra packaging configuration.
 //
-// Asset URLs are anchored under ``/-/assets/`` — deliberately OUTSIDE
-// ``settings.base_path`` (``/api``). The Litestar OpenAPI router
-// mounted at ``base_path`` registers a ``<base_path>/{path:str}``
-// not-found handler; any asset URL under ``base_path`` would be
-// shadowed by it. Keeping assets at a top-level prefix sidesteps that
-// entirely.
+// Asset URLs in the emitted ``index.html`` are RELATIVE (``./assets/...``).
+// The browser resolves them against whatever URL the SPA is served at,
+// so the chunks live next to ``index.html`` wherever Litestar mounts
+// the static-files router. That means relocating the SPA is a single
+// Python-side change (override ``settings.ui_path``) — no JS rebuild
+// or sync constant is required.
 //
-// The matching constant lives at
-// ``fusionserve.config.Settings.ui_assets_path``; the Python and JS
-// sides MUST be kept in sync (no runtime cross-check).
-//
-// The SPA itself is mounted at ``settings.ui_path`` (default ``/-/``)
-// by ``litestar-vite``. Users typically arrive via the ``/api/`` ->
-// ``settings.ui_path`` redirect emitted by
+// In production the SPA is served by Litestar's static-files router
+// (built by ``fusionserve.ui.build_spa_route_handler``), mounted at
+// ``settings.ui_path`` (default ``/api/-/``). Users typically arrive
+// via the ``<base_path>/`` -> ``settings.ui_path`` redirect emitted by
 // ``fusionserve.ui.RedirectRenderPlugin``.
+//
+// Dev workflow: ``pnpm run dev`` in ``ui/`` starts Vite's dev server at
+// ``http://localhost:5173/`` and proxies ``/api/*`` requests to the
+// backend at ``http://localhost:8001``. In dev the SPA is reached at
+// the dev-server root (Vite's history fallback serves ``index.html``);
+// hash routing keeps deep-link URLs identical between dev and prod
+// apart from the path prefix.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const bundleDir = path.resolve(__dirname, "../src/fusionserve/web/dist");
 
-export default defineConfig({
-  plugins: [
-    tailwindcss(),
-    react(),
-    litestar({
-      input: ["src/main.tsx"],
-      assetUrl: "/-/assets/",
-      bundleDir,
-      resourceDir: "src",
-    }),
-  ],
+export default defineConfig(({ command }) => ({
+  // ``base`` is applied at BOTH build time (rewriting asset URLs in
+  // emitted ``index.html``) and dev time (the dev server serves
+  // ``index.html`` at ``base``). At build time we want RELATIVE URLs
+  // so the SPA is location-independent; at dev time we want the
+  // dev-server root so ``http://localhost:5173/`` loads the app.
+  base: command === "build" ? "./" : "/",
+  plugins: [tailwindcss(), react()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
   },
-  build: {
-    // outDir lives outside the project root (inside the Python package),
-    // which by default disables Vite's "empty before build" safety.
-    // Re-enable it explicitly so repeated builds don't accumulate stale
-    // hashed chunks in ``src/fusionserve/web/dist``.
-    emptyOutDir: true,
-    // Flatten Vite's default ``assets/`` sub-directory so hashed chunks
-    // land directly under ``bundle_dir``. Combined with
-    // ``base=/-/assets/`` (set via the litestar plugin's ``assetUrl``),
-    // served URLs become ``/-/assets/<hash>.js`` instead of the doubled
-    // ``/-/assets/assets/<hash>.js`` we'd otherwise see.
-    assetsDir: "",
+  server: {
+    // ``pnpm run dev`` proxies backend traffic to the locally running
+    // Litestar app (default port 8001 per DEVELOPMENT.md). Anything
+    // under ``/api`` covers OpenAPI surfaces (Swagger, Scalar, the raw
+    // JSON document), the REST CRUD endpoints, and the GraphQL endpoint
+    // — all reachable transparently from the SPA during development.
+    proxy: {
+      "/api": { target: "http://localhost:8001", changeOrigin: true },
+    },
   },
-});
+  build: {
+    // Emit the SPA directly into the Python package so ``uv_build``
+    // packages it into the wheel automatically. ``outDir`` lives
+    // outside the project root, which by default disables Vite's
+    // "empty before build" safety — re-enable it so repeated builds
+    // don't accumulate stale hashed chunks under
+    // ``src/fusionserve/web/dist``.
+    outDir: bundleDir,
+    emptyOutDir: true,
+  },
+}));

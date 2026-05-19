@@ -45,7 +45,6 @@ dependencies = [
     "strawberry-graphql",
     "strawberry-sqlalchemy-mapper>=0.8.0",
     "typing-extensions",
-    "litestar-vite>=0.23.4",
     "uvicorn[standard]>=0.46.0",
 ]
 

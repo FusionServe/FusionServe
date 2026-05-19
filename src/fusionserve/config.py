@@ -38,28 +38,25 @@ class Settings(BaseSettings):
     base_path: str = "/api"
 
     ui_enabled: bool = True
-    # ---- UI / Vite ----
-    #: When ``True``, the Litestar Vite plugin starts the Vite dev server
-    #: (one-port HMR proxy through Litestar). Leave ``False`` in production —
-    #: the SPA is served from prebuilt assets in ``src/fusionserve/web/dist``.
-    vite_dev_mode: bool = False
-
-    #: Public URL where the React SPA lives. The OpenAPI router root at
-    #: ``base_path`` issues a 302 redirect here (see
+    # ---- UI ----
+    #: Public URL where the React SPA is mounted. The OpenAPI router root
+    #: at ``base_path`` issues a 302 redirect here (see
     #: :class:`fusionserve.ui.RedirectRenderPlugin`); the SPA itself is
-    #: served by ``litestar-vite``'s root catch-all so any unmatched path
-    #: resolves to ``index.html``. Surfaced to Vite as ``VITE_BASE_URL``
-    #: so the dev-mode proxy and the production HTML transformer resolve
-    #: asset paths against the right URL space.
-    ui_path: str = "/-/"
-
-    #: URL prefix for hashed JS/CSS chunks emitted by Vite. Must stay
-    #: **outside** :attr:`base_path` — the OpenAPI router mounted at
-    #: ``base_path`` auto-registers a ``<base_path>/{path:str}`` not-found
-    #: handler that would otherwise shadow asset requests. The matching
-    #: literal lives in ``ui/vite.config.ts`` (``assetUrl``); the Python
-    #: and JS sides must be kept in sync.
-    ui_assets_path: str = "/-/assets/"
+    #: served by the Litestar static-files router built by
+    #: :func:`fusionserve.ui.build_spa_route_handler` with
+    #: ``html_mode=True`` so ``index.html`` resolves at the mount root
+    #: and as a fallback for unmatched paths. Hashed JS/CSS chunks
+    #: emitted by Vite use *relative* asset URLs (``./assets/...`` in
+    #: ``index.html``), so they're served by the same router from the
+    #: ``<ui_path>/assets/`` URL space — no separate asset prefix
+    #: setting is needed and the SPA can be relocated by changing only
+    #: ``ui_path``.
+    #:
+    #: The empty-string default is a sentinel: :meth:`_derive_ui_path`
+    #: fills it in with ``f"{base_path.rstrip('/')}/-/"`` (default
+    #: ``/api/-/``). Setting ``UI_PATH=...`` in the environment skips
+    #: that derivation and uses the literal verbatim.
+    ui_path: str = ""
 
     jwt_issuer: str | None = None
     jwks_url: str | None = None
@@ -79,6 +76,19 @@ class Settings(BaseSettings):
     def _fill_claims_map(self):
         self.claims_map.roles = f"/resource_access/{self.client_id}/roles"
         self.claims_map.role = f"/resource_access/{self.client_id}/roles/0"
+        return self
+
+    @model_validator(mode="after")
+    def _derive_ui_path(self):
+        """Fill ``ui_path`` from ``base_path`` when the user didn't set it.
+
+        The default ``base_path`` of ``/api`` gives a derived
+        ``ui_path`` of ``/api/-/``. Explicit ``UI_PATH=...`` overrides
+        in the environment skip this branch (the field arrives
+        non-empty from pydantic-settings).
+        """
+        if not self.ui_path:
+            self.ui_path = f"{self.base_path.rstrip('/')}/-/"
         return self
 
 
