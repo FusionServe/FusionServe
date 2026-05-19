@@ -144,6 +144,27 @@ process will not come up without the database.
   `/api/v1/<table>`); the same `v1` prefix applies to PG-function
   controllers. The version segment is hard-coded in `fusionserve.rest`;
   bump via a single grep when introducing a `/v2`.
+- File uploads are an **opt-in** feature gated on the presence of an
+  operator-supplied `uploads` table (name configurable via
+  `STORAGE_METADATA_TABLE`). The specialized controller in
+  `fusionserve.files` mounts at `<base_path>/v1/_uploads` (leading
+  underscore namespaces it away from the auto-generated CRUD at
+  `<base_path>/v1/uploads`). GraphQL is deliberately untouched — do
+  not introduce schema-build branches keyed on the metadata table
+  name; lock writes down via RLS on the operator side. The cascading
+  delete lives at `DELETE /api/v1/_uploads/{id}`; the auto-generated
+  `DELETE /api/v1/uploads/{id}` only removes the metadata row and
+  orphans the blob. Storage backend selection (`STORAGE_BACKEND`)
+  accepts `"filesystem"`, `"s3"`, or a `"pkg.mod:Class"` dotted
+  import path resolved by `fusionserve.storage.load_backend` —
+  custom backends must implement the `StorageBackend` Protocol in
+  `fusionserve.storage.base` and be instantiable with no arguments
+  (read your own settings from `fusionserve.config`).
+- The SPA uses **hash routing** (`createHashHistory`) so client-side
+  paths (`/-/#/openapi`, `/-/#/graphql`, …) cannot collide with any
+  future top-level Litestar route. Browser history would also work
+  given the current layout, but hash routing is one fewer thing to
+  reason about.
 - The SPA uses **browser-history (path) routing** (`createBrowserHistory`,
   `ui/src/lib/router.ts`). Client-side deep links (`<ui_path>data`,
   `<ui_path>graphql`, …) reload via the index handler's `{path:path}`
