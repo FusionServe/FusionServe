@@ -13,9 +13,10 @@ from litestar.openapi.plugins import JsonRenderPlugin, ScalarRenderPlugin, Swagg
 from litestar.openapi.spec import Components, SecurityScheme
 from litestar.plugins.prometheus import PrometheusConfig, PrometheusController
 
-from . import auth, graphql, rest, ui
+from . import auth, files, graphql, rest, ui
 from .config import get_config, settings
 from .persistence import get_async_session, introspect
+from .storage import get_storage
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -29,6 +30,24 @@ async def lifespan(app: Litestar):
     for controller in rest.build_function_controllers(schema):
         app.register(controller)
     app.register(graphql.build(schema))
+    # ---- file uploads ----
+    # The files controller mounts at ``<base_path>/v1/_uploads`` and
+    # coexists with the auto-generated CRUD for the ``uploads`` table
+    # at ``<base_path>/v1/uploads``. Operators are expected to lock
+    # the auto-generated routes down via RLS (see docs/files.md). The
+    # feature gracefully disables when the operator-supplied table is
+    # absent — the rest of the app still starts.
+    uploads_cls = schema.base.classes.get(settings.storage_metadata_table)
+    if uploads_cls is not None:
+        files.validate_uploads_table(uploads_cls)
+        app.register(files.build_controller(uploads_cls, get_storage()))
+        _logger.info("File uploads enabled at %s/v1/_uploads", settings.base_path)
+    else:
+        _logger.warning(
+            "File uploads disabled: table %s.%s not found.",
+            settings.pg_app_schema,
+            settings.storage_metadata_table,
+        )
     yield
 
 

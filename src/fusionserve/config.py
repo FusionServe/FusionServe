@@ -1,8 +1,37 @@
+from pathlib import Path
+
 from litestar import get
 from litestar.dto import DTOConfig
 from litestar.plugins.pydantic import PydanticDTO
 from pydantic import BaseModel, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class S3Settings(BaseModel):
+    """Configuration for the S3 storage backend.
+
+    Mapped to ``STORAGE_S3__<FIELD>`` environment variables via the
+    nested-delimiter mechanism in :class:`Settings`.
+
+    Attributes:
+        bucket: Target S3 bucket name. Required when ``storage_backend="s3"``.
+        region: AWS region of the bucket.
+        endpoint_url: Optional custom endpoint URL for S3-compatible backends
+            (MinIO, LocalStack, etc.). When ``None`` the default AWS endpoint
+            for the configured region is used.
+        access_key_id: AWS access key. When ``None`` aioboto3 falls back to
+            the standard credential resolution chain (env vars, IAM role).
+        secret_access_key: AWS secret key. See ``access_key_id``.
+        presign_ttl_seconds: Lifetime of presigned GET URLs returned by
+            :meth:`fusionserve.storage.s3.S3Backend.presigned_url`.
+    """
+
+    bucket: str = ""
+    region: str = "us-east-1"
+    endpoint_url: str | None = None
+    access_key_id: str | None = None
+    secret_access_key: SecretStr | None = None
+    presign_ttl_seconds: int = 3600
 
 
 class ClaimsMap(BaseModel):
@@ -58,6 +87,29 @@ class Settings(BaseSettings):
     #: that derivation and uses the literal verbatim.
     ui_path: str = ""
 
+    # ---- Storage / file uploads ----
+    #: Backend selector. ``"filesystem"`` and ``"s3"`` resolve to the
+    #: bundled :class:`fusionserve.storage.filesystem.FilesystemBackend` and
+    #: :class:`fusionserve.storage.s3.S3Backend` respectively. Any other
+    #: value is treated as a dotted import path ``"pkg.mod:ClassName"`` and
+    #: loaded via :func:`fusionserve.storage.load_backend`.
+    storage_backend: str = "filesystem"
+    #: Name of the metadata table (in ``pg_app_schema``) the files
+    #: controller consults. When absent, the files feature is silently
+    #: disabled at startup.
+    storage_metadata_table: str = "uploads"
+    #: Aggregate cap (in bytes) on a multi-file upload request. The
+    #: multipart body parser rejects oversize requests before the handler
+    #: runs.
+    storage_max_total_bytes: int = 500 * 1024 * 1024
+    #: Per-file cap (in bytes). Exceeding files appear as ``status:
+    #: "error"`` entries in the response without aborting the whole batch.
+    storage_max_single_file_bytes: int = 100 * 1024 * 1024
+    #: Root directory used by the filesystem backend.
+    storage_fs_root: Path = Path("/var/lib/fusionserve/uploads")
+    #: Nested S3 settings (``STORAGE_S3__BUCKET=…`` etc.).
+    storage_s3: S3Settings = S3Settings()
+
     jwt_issuer: str | None = None
     jwks_url: str | None = None
     client_id: str | None = app_name.lower()
@@ -89,6 +141,18 @@ class Settings(BaseSettings):
         """
         if not self.ui_path:
             self.ui_path = f"{self.base_path.rstrip('/')}/-/"
+        return self
+
+    @model_validator(mode="after")
+    def _validate_storage(self):
+        """Enforce backend-specific required fields.
+
+        The S3 backend is unusable without a bucket name, so we fail fast
+        at settings-load time rather than letting the storage layer raise
+        opaque errors on the first request.
+        """
+        if self.storage_backend == "s3" and not self.storage_s3.bucket:
+            raise ValueError("storage_backend='s3' requires STORAGE_S3__BUCKET to be set")
         return self
 
 

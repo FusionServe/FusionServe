@@ -22,6 +22,8 @@ classifiers = [
 requires-python = ">=3.14"
 dependencies = [
     "advanced-alchemy>=1.9.3",
+    "aioboto3>=13.0.0",
+    "aiofiles>=24.1.0",
     "asyncpg",
     "brotli>=1.2.0",
     # Both granian and uvicorn are supported runtime servers.
@@ -64,6 +66,7 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "ruff>=0.15.12",
     "testcontainers[postgres]>=4.14.2",
+    "types-aiofiles>=24.1.0",
 ]
 
 [tool.ruff]
@@ -108,6 +111,12 @@ select = [
 # fixtures — relax a few rules that are noisy without adding signal.
 "tests/**" = [
     "RUF012",  # mutable class attrs in dataclass-style stubs
+]
+# Parent-relative imports (``from ..config import settings``) are the
+# house style inside ``fusionserve``'s subpackages — they keep the
+# module location reflected in the import path. Don't fight it.
+"src/fusionserve/**" = [
+    "TID252",  # allow ``from ..foo import bar``
 ]
 
 [tool.pytest.ini_options]

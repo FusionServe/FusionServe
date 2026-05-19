@@ -20,6 +20,9 @@ tables as web APIs without manually writing endpoints.
   per-request `SET ROLE` and row-level security.
 - **JWT authentication** — JWKS-based RS256 verification with OIDC
   discovery support.
+- **File uploads** — multi-file upload over REST with a pluggable
+  storage backend (local filesystem, S3, or a custom dotted-import
+  class). See `docs/features/file_uploads.md`.
 - **Prometheus Metrics** — built-in `/metrics` endpoint.
 - **Brotli/GZip Compression** — optimized response compression.
 
