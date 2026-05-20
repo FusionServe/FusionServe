@@ -44,7 +44,7 @@ jobs:
         # ``pnpm/action-setup`` reads the ``packageManager`` field from
         # ``ui/package.json`` to install the pinned pnpm version, so the
         # version is governed by a single source of truth.
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           package_json_file: ui/package.json
 
