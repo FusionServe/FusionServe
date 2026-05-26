@@ -168,13 +168,16 @@ def _scalar_name_from_constraint(constraint: ForeignKeyConstraint, local_table_n
         The derived relationship name, or ``None`` if the constraint has no
         name or the derivation collapses to an empty string.
     """
-    prefix = f"{local_table_name}_"
     if not constraint.name:
         return None
-    name = constraint.name.lstrip(prefix)
+    name = constraint.name.removeprefix(f"{local_table_name}_")
     for suffix in ("_fkey", "_fk", "_FKEY", "_FK"):
-        name = name.rstrip(suffix)
-    return name.lstrip("_id") or None
+        stripped = name.removesuffix(suffix)
+        if stripped != name:
+            name = stripped
+            break
+    name = name.removesuffix("_id")
+    return name or None
 
 
 def _scalar_name_from_columns(constraint: ForeignKeyConstraint) -> str | None:
