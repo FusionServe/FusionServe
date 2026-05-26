@@ -52,7 +52,7 @@ jobs:
         # Cache the pnpm store keyed on the committed lockfile; pnpm
         # must already be on PATH (above) for setup-node to resolve the
         # store path.
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: pnpm
