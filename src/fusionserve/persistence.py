@@ -10,8 +10,17 @@ from pydantic import Field, TypeAdapter
 from sqlalchemy import DDL, Column, MetaData, Select, create_engine, func, text
 from sqlalchemy.engine import URL, Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.ext.automap import automap_base
+from sqlalchemy.ext.automap import (
+    automap_base,
+)
+from sqlalchemy.ext.automap import (
+    name_for_collection_relationship as _default_collection_name,
+)
+from sqlalchemy.ext.automap import (
+    name_for_scalar_relationship as _default_scalar_name,
+)
 from sqlalchemy.orm import DeclarativeMeta, load_only
+from sqlalchemy.sql.schema import ForeignKeyConstraint
 from strawberry.scalars import JSON as StrawberryJSON
 
 from .auth import User
@@ -123,6 +132,130 @@ def pydantic_field_from_column(
     return (field_type, Field(default, description=column.comment))
 
 
+def _fk_constraints_to(local_table, referred_table) -> list[ForeignKeyConstraint]:
+    """Return the FK constraints on ``local_table`` that reference ``referred_table``.
+
+    Iterates ``local_table.foreign_key_constraints`` and keeps only those whose
+    ``referred_table`` is the requested target. Used by the relationship
+    naming callbacks to detect "multiple FKs to same target" situations.
+    """
+    return [fk for fk in local_table.foreign_key_constraints if fk.referred_table is referred_table]
+
+
+def _scalar_name_from_constraint(constraint: ForeignKeyConstraint, local_table_name: str) -> str | None:
+    """Derive a scalar relationship name from a FK constraint's own name.
+
+    Applies the FK naming convention used in the schema:
+
+    1. Strip ``<local_table_name>_`` prefix.
+    2. Strip ``_fk`` or ``_fkey`` suffix (handles user conventions and
+       PostgreSQL's default ``<table>_<column>_fkey``).
+    3. Strip a trailing ``_id`` (handles the PostgreSQL default form).
+
+    Worked examples:
+
+    * ``posts_authors_fk`` -> ``authors``
+    * ``messages_sender_id_fkey`` -> ``sender``
+    * ``posts_author_fk`` -> ``author``
+
+    Args:
+        constraint: The FK constraint to inspect. Its ``name`` may be ``None``
+            if the constraint was unnamed in the source schema.
+        local_table_name: The name of the table that owns the constraint;
+            used as the prefix to strip.
+
+    Returns:
+        The derived relationship name, or ``None`` if the constraint has no
+        name or the derivation collapses to an empty string.
+    """
+    prefix = f"{local_table_name}_"
+    name = constraint.name.lstrip(prefix)
+    for suffix in ("_fkey", "_fk", "_FKEY", "_FK"):
+        name = name.rstrip(suffix)
+    return name.lstrip("_id") or None
+
+
+def _scalar_name_from_columns(constraint: ForeignKeyConstraint) -> str | None:
+    """Derive a scalar relationship name from the FK's local columns.
+
+    Fallback used when :func:`_scalar_name_from_constraint` returns ``None``.
+    Joins the local column names with ``_`` and strips a trailing ``_id`` from
+    the single-column case (the only one where stripping is unambiguous).
+    """
+    column_names = [c.name for c in constraint.columns]
+    if not column_names:
+        return None
+    if len(column_names) == 1:
+        name = column_names[0]
+        if name.endswith("_id"):
+            name = name[: -len("_id")]
+        return name or None
+    return "_".join(column_names) or None
+
+
+def _disambiguate(name: str, taken: set[str]) -> str:
+    """Return ``name`` (or ``name_2``, ``name_3``, ...) so it is not in ``taken``."""
+    if name not in taken:
+        return name
+    counter = 2
+    while f"{name}_{counter}" in taken:
+        counter += 1
+    return f"{name}_{counter}"
+
+
+def _name_for_scalar_relationship(base, local_cls, referred_cls, constraint: ForeignKeyConstraint) -> str:
+    """Automap callback: produce a scalar relationship name on ``local_cls``.
+
+    For tables with a single FK to ``referred_cls`` this delegates to
+    SQLAlchemy's :func:`name_for_scalar_relationship` so existing API
+    contracts (e.g. ``Order.user``) are unchanged. For multi-FK cases the
+    name is derived from the FK constraint name (see
+    :func:`_scalar_name_from_constraint`) with a column-based fallback and a
+    positional suffix as last resort.
+    """
+    local_table = local_cls.__table__
+    referred_table = referred_cls.__table__
+    siblings = _fk_constraints_to(local_table, referred_table)
+    if len(siblings) <= 1:
+        return _default_scalar_name(base, local_cls, referred_cls, constraint)
+    derived = _scalar_name_from_constraint(constraint, local_table.name) or _scalar_name_from_columns(constraint)
+    if not derived:
+        derived = _default_scalar_name(base, local_cls, referred_cls, constraint)
+    # Avoid collisions with already-attached relationships on ``local_cls``.
+    taken: set[str] = set(local_cls.__mapper__.relationships.keys()) if hasattr(local_cls, "__mapper__") else set()
+    return _disambiguate(derived, taken)
+
+
+def _name_for_collection_relationship(base, local_cls, referred_cls, constraint: ForeignKeyConstraint) -> str:
+    """Automap callback: produce a collection relationship name on ``local_cls``.
+
+    Here ``local_cls`` is the *referred* side (the "one") of the FK and
+    ``referred_cls`` is the source (the "many"). Single-FK cases delegate to
+    SQLAlchemy's :func:`name_for_collection_relationship`. Multi-FK cases use
+    ``<source_plural>_as_<scalar_name>`` so the two sides remain symmetric
+    (e.g. ``User.messages_as_sender`` mirrors ``Message.sender``).
+    """
+    # In the collection callback, ``constraint`` lives on ``referred_cls``
+    # (the "many" side) and points back to ``local_cls`` (the "one" side).
+    source_table = referred_cls.__table__
+    target_table = local_cls.__table__
+    siblings = _fk_constraints_to(source_table, target_table)
+    if len(siblings) <= 1:
+        return _default_collection_name(base, local_cls, referred_cls, constraint)
+    scalar = (
+        _scalar_name_from_constraint(constraint, source_table.name)
+        or _scalar_name_from_columns(constraint)
+        or _default_scalar_name(base, referred_cls, local_cls, constraint)
+    )
+    # ``introspect()`` validates that every table name is plural, so using
+    # ``source_table.name`` directly yields the desired ``<plural>_as_<role>``
+    # shape (e.g. ``messages_as_sender``) without automap's ``_collection``
+    # suffix that the default callback prepends.
+    derived = f"{source_table.name}_as_{scalar}"
+    taken: set[str] = set(local_cls.__mapper__.relationships.keys()) if hasattr(local_cls, "__mapper__") else set()
+    return _disambiguate(derived, taken)
+
+
 def introspect() -> Introspection:
     """Reflect the configured PostgreSQL schema and return its full description.
 
@@ -152,20 +285,23 @@ def introspect() -> Introspection:
     with _engine.begin() as connection:
         _logger.debug("Running DDL to create %s.current_user_id() function", schema)
         connection.execute(_current_user_id_ddl(schema))
-    metadata = MetaData()
-    metadata.reflect(bind=_engine, schema=schema)
-
-    Base = automap_base(metadata=metadata)
-    # calling prepare() just sets up mapped classes and relationships.
-    Base.prepare()
-    for table in metadata.sorted_tables:
-        if not inflect.singular_noun(table.name):
-            raise ValueError(f"Table name {table.name} is not plural")
-
-    known_tables = {t.name for t in metadata.sorted_tables}
-    with _engine.connect() as connection:
+        metadata = MetaData()
+        metadata.reflect(bind=_engine, schema=schema)
+        for table in metadata.sorted_tables:
+            if not inflect.singular_noun(table.name):
+                raise ValueError(f"Table name {table.name} is not plural")
+        base = automap_base(metadata=metadata)
+        # Pass custom naming callbacks so tables with multiple FKs to the same
+        # target get unique, semantically meaningful relationship names instead
+        # of automap's positional ``user`` / ``user1`` suffixes (which collide
+        # in the GraphQL schema and cause one relationship to be dropped).
+        base.prepare(
+            name_for_scalar_relationship=_name_for_scalar_relationship,
+            name_for_collection_relationship=_name_for_collection_relationship,
+        )
+        known_tables = {t.name for t in metadata.sorted_tables}
         functions = _introspect_functions(connection, schema, known_tables)
-    return Introspection(base=Base, functions=functions)
+    return Introspection(base=base, functions=functions)
 
 
 async def set_role(session: AsyncSession, user: User | None):

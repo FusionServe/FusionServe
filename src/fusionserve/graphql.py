@@ -42,7 +42,7 @@ from .models import (
     SmartComment,
     SortDirection,
 )
-from .persistence import apply_load_only, async_session, inflect, set_role
+from .persistence import _scalar_name_from_constraint, apply_load_only, async_session, inflect, set_role
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -222,13 +222,13 @@ def _rename_fk_fields(gql_type: type, table: Table) -> None:
             ``mapper.type(orm_class)(...)``.
         table: The SQLAlchemy ``Table`` whose foreign keys are used to identify relationship fields.
     """
-    # TODO: when two foreign keys point to the same table only one related object is exposed,
-    # bug in strawberry-sqlalchemy-mapper?
-    for fk in table.foreign_keys:
-        field = gql_type.__strawberry_definition__.get_field(fk.column.table.name)
-        if field is None:
-            continue
-        field.graphql_name = to_camel_case(inflect.singular_noun(fk.column.table.name))
+    for fk in table.foreign_key_constraints:
+        field = gql_type.__strawberry_definition__.get_field(fk.referred_table.name)
+        if field:
+            field.graphql_name = to_camel_case(inflect.singular_noun(fk.referred_table.name))
+        field = gql_type.__strawberry_definition__.get_field(_scalar_name_from_constraint(fk, fk.table.name))
+        if field:
+            field.graphql_name = to_camel_case(inflect.singular_noun(_scalar_name_from_constraint(fk, fk.table.name)))
 
 
 def columns_from_selections(

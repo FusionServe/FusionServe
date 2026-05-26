@@ -10,6 +10,7 @@ from __future__ import annotations
 from sqlalchemy import (
     Column,
     DateTime,
+    ForeignKey,
     Integer,
     MetaData,
     String,
@@ -17,9 +18,14 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.ext.automap import automap_base
 
 from fusionserve.models import SmartComment
-from fusionserve.persistence import pydantic_field_from_column
+from fusionserve.persistence import (
+    _name_for_collection_relationship,
+    _name_for_scalar_relationship,
+    pydantic_field_from_column,
+)
 
 
 def _make_table(comment: str | None = None) -> Table:
@@ -148,3 +154,109 @@ def test_pydantic_field_server_default_text_works_too():
     field_type, field = pydantic_field_from_column(table.c.flag, "create_input")
     assert type(None) in field_type.__args__
     assert field.default is None
+
+
+# --- automap relationship naming --------------------------------------------
+
+
+def _prepare_with_helpers(metadata: MetaData):
+    """Build an automap base from ``metadata`` using the persistence callbacks.
+
+    Returns the prepared :class:`AutomapBase` so tests can inspect
+    ``Base.classes.<table>.__mapper__.relationships``.
+    """
+    Base = automap_base(metadata=metadata)
+    Base.prepare(
+        name_for_scalar_relationship=_name_for_scalar_relationship,
+        name_for_collection_relationship=_name_for_collection_relationship,
+    )
+    return Base
+
+
+def test_single_fk_preserves_automap_default_names():
+    """Tables with one FK to a target keep SQLAlchemy's default names."""
+    metadata = MetaData()
+    Table("users", metadata, Column("id", Integer, primary_key=True))
+    Table(
+        "orders",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("user_id", Integer, ForeignKey("users.id")),
+    )
+    Base = _prepare_with_helpers(metadata)
+    order_rels = set(Base.classes.orders.__mapper__.relationships.keys())
+    user_rels = set(Base.classes.users.__mapper__.relationships.keys())
+    # The automap default for a scalar relationship is the referred class name
+    # lowercased; for a collection it is ``<table>_collection``. Whatever those
+    # defaults are, our helpers must not have altered them in the single-FK
+    # case — assert at least one relationship exists on each side and that no
+    # ``_as_`` suffix has leaked in (those are reserved for multi-FK cases).
+    assert order_rels
+    assert user_rels
+    assert not any("_as_" in name for name in order_rels | user_rels)
+
+
+def test_multi_fk_scalar_names_derived_from_constraint_pg_default():
+    """Multi-FK scalar names follow the ``<table>_<col>_fkey`` PG convention."""
+    metadata = MetaData()
+    Table("users", metadata, Column("id", Integer, primary_key=True))
+    Table(
+        "messages",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("sender_id", Integer, ForeignKey("users.id", name="messages_sender_id_fkey")),
+        Column("recipient_id", Integer, ForeignKey("users.id", name="messages_recipient_id_fkey")),
+    )
+    Base = _prepare_with_helpers(metadata)
+    msg_rels = set(Base.classes.messages.__mapper__.relationships.keys())
+    assert msg_rels == {"sender", "recipient"}
+
+
+def test_multi_fk_scalar_names_derived_from_fk_convention():
+    """Multi-FK scalar names also honour the ``<table>_<role>_fk`` convention."""
+    metadata = MetaData()
+    Table("authors", metadata, Column("id", Integer, primary_key=True))
+    Table(
+        "posts",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("primary_author_id", Integer, ForeignKey("authors.id", name="posts_authors_fk")),
+        Column("secondary_author_id", Integer, ForeignKey("authors.id", name="posts_co_authors_fk")),
+    )
+    Base = _prepare_with_helpers(metadata)
+    post_rels = set(Base.classes.posts.__mapper__.relationships.keys())
+    assert post_rels == {"authors", "co_authors"}
+
+
+def test_multi_fk_collection_names_use_as_suffix():
+    """The reverse side of multi-FK relationships uses ``<plural>_as_<role>``."""
+    metadata = MetaData()
+    Table("users", metadata, Column("id", Integer, primary_key=True))
+    Table(
+        "messages",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("sender_id", Integer, ForeignKey("users.id", name="messages_sender_id_fkey")),
+        Column("recipient_id", Integer, ForeignKey("users.id", name="messages_recipient_id_fkey")),
+    )
+    Base = _prepare_with_helpers(metadata)
+    user_rels = set(Base.classes.users.__mapper__.relationships.keys())
+    assert user_rels == {"messages_as_sender", "messages_as_recipient"}
+
+
+def test_multi_fk_unnamed_constraint_falls_back_to_columns():
+    """Anonymous FK constraints fall back to FK column name stripped of ``_id``."""
+    metadata = MetaData()
+    Table("users", metadata, Column("id", Integer, primary_key=True))
+    Table(
+        "messages",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        # No ``name=`` on the ForeignKey — SQLAlchemy/automap will see an
+        # unnamed constraint, so the column-name fallback kicks in.
+        Column("sender_id", Integer, ForeignKey("users.id")),
+        Column("recipient_id", Integer, ForeignKey("users.id")),
+    )
+    Base = _prepare_with_helpers(metadata)
+    msg_rels = set(Base.classes.messages.__mapper__.relationships.keys())
+    assert msg_rels == {"sender", "recipient"}

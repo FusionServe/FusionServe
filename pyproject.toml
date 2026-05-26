@@ -21,7 +21,6 @@ classifiers = [
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "advanced-alchemy>=1.9.3",
     "asyncpg",
     "brotli>=1.2.0",
     # Both granian and uvicorn are supported runtime servers.
@@ -46,6 +45,7 @@ dependencies = [
     "strawberry-sqlalchemy-mapper>=0.8.0",
     "typing-extensions",
     "uvicorn[standard]>=0.46.0",
+    "advanced-alchemy==1.9.3",
 ]
 
 [build-system]
