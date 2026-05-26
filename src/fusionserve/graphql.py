@@ -10,9 +10,10 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
+# TODO: restore from litestar import Request: need bettere understanding namespace clash.
+import litestar
+import litestar.datastructures
 import strawberry
-from litestar import Request, WebSocket
-from litestar.datastructures import State
 from pydantic.alias_generators import to_pascal
 from sqlalchemy import Column, Table, and_, delete, func, insert, not_, or_, select, text, update
 from sqlalchemy.orm import DeclarativeMeta
@@ -103,7 +104,7 @@ class CustomHTTPContextType(HTTPContextType, CustomContext):
         request: The typed Litestar HTTP request object.
     """
 
-    request: Request[auth.User, Any, State]
+    request: litestar.Request[auth.User, Any, litestar.datastructures.State]
 
 
 class CustomWSContextType(WebSocketContextType, CustomContext):
@@ -113,10 +114,10 @@ class CustomWSContextType(WebSocketContextType, CustomContext):
         socket: The typed Litestar WebSocket connection object.
     """
 
-    socket: WebSocket[auth.User, Any, State]
+    socket: litestar.WebSocket[auth.User, Any, litestar.datastructures.State]
 
 
-async def custom_context_getter(request: Request) -> CustomContext:
+async def custom_context_getter(request: litestar.Request) -> CustomContext:
     """Create a custom Strawberry context for each GraphQL request.
 
     The SQLAlchemy relationship loader receives an ``async_bind_factory`` that
