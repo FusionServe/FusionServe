@@ -169,6 +169,8 @@ def _scalar_name_from_constraint(constraint: ForeignKeyConstraint, local_table_n
         name or the derivation collapses to an empty string.
     """
     prefix = f"{local_table_name}_"
+    if not constraint.name:
+        return None
     name = constraint.name.lstrip(prefix)
     for suffix in ("_fkey", "_fk", "_FKEY", "_FK"):
         name = name.rstrip(suffix)
