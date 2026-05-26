@@ -38,3 +38,4 @@ loggers:
     level: DEBUG
     handlers:
       - default
+    propagate: no

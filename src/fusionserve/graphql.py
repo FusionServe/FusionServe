@@ -29,7 +29,7 @@ from strawberry.types.arguments import StrawberryArgument
 from strawberry.utils.str_converters import to_camel_case, to_snake_case
 from strawberry_sqlalchemy_mapper import StrawberrySQLAlchemyLoader, StrawberrySQLAlchemyMapper
 
-from .auth import User
+from . import auth
 from .config import settings
 from .models import (
     COMPARISON_TYPE_MAP,
@@ -103,7 +103,7 @@ class CustomHTTPContextType(HTTPContextType, CustomContext):
         request: The typed Litestar HTTP request object.
     """
 
-    request: Request[User, Any, State]
+    request: Request[auth.User, Any, State]
 
 
 class CustomWSContextType(WebSocketContextType, CustomContext):
@@ -113,7 +113,7 @@ class CustomWSContextType(WebSocketContextType, CustomContext):
         socket: The typed Litestar WebSocket connection object.
     """
 
-    socket: WebSocket[User, Any, State]
+    socket: WebSocket[auth.User, Any, State]
 
 
 async def custom_context_getter(request: Request) -> CustomContext:
@@ -143,7 +143,7 @@ async def custom_context_getter(request: Request) -> CustomContext:
     )
 
 
-@strawberry.experimental.pydantic.type(model=User, all_fields=True, description="The authenticated user from JWT")
+@strawberry.experimental.pydantic.type(model=auth.User, all_fields=True, description="The authenticated user from JWT")
 class JWTUser:
     pass
 
@@ -204,14 +204,30 @@ def _set_field_descriptions(gql_type: type, table: Table) -> None:
         table: The SQLAlchemy ``Table`` whose column comments source the
             descriptions.
     """
-    fields_by_name = {f.python_name: f for f in gql_type.__strawberry_definition__.fields}
     for column in table.columns:
-        field = fields_by_name.get(column.name)
+        field = gql_type.__strawberry_definition__.get_field(column.name)
         if field is None:
             continue
         content = SmartComment.from_object(column).content
         if content:
             field.description = content
+
+
+def _rename_fk_fields(gql_type: type, table: Table) -> None:
+    """Rename Relationship fields in singular form
+
+    Args:
+        gql_type: The Strawberry-decorated output type returned by
+            ``mapper.type(orm_class)(...)``.
+        table: The SQLAlchemy ``Table`` whose foreign keys are used to identify relationship fields.
+    """
+    # TODO: when two foreign keys point to the same table only one related object is exposed,
+    # bug in strawberry-sqlalchemy-mapper?
+    for fk in table.foreign_keys:
+        field = gql_type.__strawberry_definition__.get_field(fk.column.table.name)
+        if field is None:
+            continue
+        field.graphql_name = to_camel_case(inflect.singular_noun(fk.column.table.name))
 
 
 def columns_from_selections(
@@ -953,7 +969,10 @@ def build(introspection: Introspection):
         A Litestar-compatible GraphQL controller ready to be mounted
         on the application.
     """
-    mapper = StrawberrySQLAlchemyMapper(always_use_list=True)
+    mapper = StrawberrySQLAlchemyMapper(
+        always_use_list=True,
+        model_to_type_name=lambda model: to_pascal(inflect.singular_noun(model.__name__)),
+    )
     _base = introspection.base
 
     class Query:
@@ -977,6 +996,7 @@ def build(introspection: Introspection):
         if comment.content:
             gql_type.__strawberry_definition__.description = comment.content
         _set_field_descriptions(gql_type, table)
+        _rename_fk_fields(gql_type, table)
         # ---- Query: list ----
         setattr(
             Query,
