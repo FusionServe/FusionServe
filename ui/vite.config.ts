@@ -39,6 +39,13 @@ export default defineConfig(({ command }) => ({
   // so the SPA is location-independent; at dev time we want the
   // dev-server root so ``http://localhost:5173/`` loads the app.
   base: command === "build" ? "./" : "/",
+  // ``swagger-ui-react`` pulls in ``swagger-client`` / ``buffer`` and other
+  // packages that reference the Node ``global`` object, which doesn't exist
+  // in the browser. Map it to ``globalThis`` so those modules load under
+  // Vite (both dev and build).
+  define: {
+    global: "globalThis",
+  },
   plugins: [tailwindcss(), react()],
   resolve: {
     alias: {

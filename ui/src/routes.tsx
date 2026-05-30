@@ -1,4 +1,4 @@
-import { Suspense, lazy } from "react";
+import { type ReactNode, Suspense, lazy } from "react";
 import {
   Outlet,
   createRootRoute,
@@ -7,26 +7,45 @@ import {
 
 import { AppLayout } from "./components/AppLayout";
 import { LandingPage } from "./pages/LandingPage";
-import { OpenAPIPage } from "./pages/OpenAPIPage";
 
-// GraphiQL pulls in Monaco and is several MB; lazy-load it so it only
-// downloads when the ``/graphql`` route is visited, keeping the initial
-// bundle small for the other pages.
+// Both API explorers pull in heavy dependencies (GraphiQL → Monaco;
+// OpenAPI → swagger-ui-react), so they're lazy-loaded and only download
+// when their route is visited, keeping the initial bundle small.
 const GraphQLPage = lazy(() =>
   import("./pages/GraphQLPage").then((m) => ({ default: m.GraphQLPage })),
 );
 
-function GraphQLRouteComponent() {
+const OpenAPIPage = lazy(() =>
+  import("./pages/OpenAPIPage").then((m) => ({ default: m.OpenAPIPage })),
+);
+
+function LazyRoute({ children, label }: { children: ReactNode; label: string }) {
   return (
     <Suspense
       fallback={
         <div className="flex h-[calc(100vh-9rem)] items-center justify-center text-sm text-zinc-500 dark:text-zinc-400">
-          Loading GraphiQL…
+          {label}
         </div>
       }
     >
-      <GraphQLPage />
+      {children}
     </Suspense>
+  );
+}
+
+function GraphQLRouteComponent() {
+  return (
+    <LazyRoute label="Loading GraphiQL…">
+      <GraphQLPage />
+    </LazyRoute>
+  );
+}
+
+function OpenAPIRouteComponent() {
+  return (
+    <LazyRoute label="Loading Swagger UI…">
+      <OpenAPIPage />
+    </LazyRoute>
   );
 }
 
@@ -47,7 +66,7 @@ const indexRoute = createRoute({
 const openapiRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/openapi",
-  component: OpenAPIPage,
+  component: OpenAPIRouteComponent,
 });
 
 const graphqlRoute = createRoute({

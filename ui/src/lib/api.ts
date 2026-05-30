@@ -12,3 +12,12 @@ export const SWAGGER_URL = "/api/swagger";
 
 /** Public URL of the GraphQL endpoint (also serves GraphiQL on GET). */
 export const GRAPHQL_URL = "/api/graphql";
+
+/**
+ * Public URL of the backend client-configuration document.
+ *
+ * Returns a subset of server settings consumed by the SPA — notably
+ * ``jwt_issuer`` (the OIDC issuer used for ``.well-known`` discovery) and
+ * the public ``client_id`` for the Authorization Code + PKCE flow.
+ */
+export const CONFIG_URL = "/api/config.json";

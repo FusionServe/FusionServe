@@ -1,43 +1,21 @@
-import { OPENAPI_URL, SWAGGER_URL } from "@/lib/api";
+import SwaggerUI from "swagger-ui-react";
 
-// The OpenAPI reference is rendered by the backend via Litestar's
-// ``SwaggerRenderPlugin`` (mounted on the OpenAPI router at
-// ``/api/swagger``). We embed it directly via an iframe so users get
-// the full official UI without dragging Swagger UI / Scalar React
-// components and their transitive deps into our bundle — same approach
-// as ``GraphQLPage`` does for GraphiQL.
+// Swagger UI is now bundled directly (replacing the previous iframe to the
+// backend-served ``/api/swagger``). It fetches the raw spec from
+// ``/api/openapi.json``; in dev Vite proxies that to the Litestar backend,
+// and "Try it out" requests hit ``/api/v1/...`` through the same proxy.
+import "swagger-ui-react/swagger-ui.css";
+// Best-effort dark theme. Swagger UI has no theming API, so this file
+// hand-overrides its surfaces under the app's ``.dark`` class. Co-located
+// with this lazily-imported page so it stays out of the global bundle.
+import "@/styles/swagger-dark.css";
+
+import { OPENAPI_URL } from "@/lib/api";
+
 export function OpenAPIPage() {
   return (
-    <section className="flex h-[calc(100vh-12rem)] flex-col gap-4">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">OpenAPI reference</h1>
-        <p className="text-zinc-600 dark:text-zinc-400">
-          Swagger UI served by the backend at{" "}
-          <a
-            href={SWAGGER_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="font-mono text-blue-600 hover:underline dark:text-blue-400"
-          >
-            {SWAGGER_URL}
-          </a>
-          . Raw spec at{" "}
-          <a
-            href={OPENAPI_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="font-mono text-blue-600 hover:underline dark:text-blue-400"
-          >
-            {OPENAPI_URL}
-          </a>
-          .
-        </p>
-      </header>
-      <iframe
-        title="Swagger UI"
-        src={SWAGGER_URL}
-        className="flex-1 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
-      />
-    </section>
+    <div className="h-[calc(100vh-9rem)] overflow-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
+      <SwaggerUI url={OPENAPI_URL} />
+    </div>
   );
 }

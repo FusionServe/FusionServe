@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 
 import { ThemeToggle } from "./ThemeToggle";
+import { UserBadge } from "./UserBadge";
 
 interface NavItem {
   to: string;
@@ -56,6 +57,7 @@ export function AppLayout({ children }: AppLayoutProps) {
           </nav>
           <div className="ml-auto flex items-center gap-3">
             <ThemeToggle />
+            <UserBadge />
           </div>
         </div>
       </header>
