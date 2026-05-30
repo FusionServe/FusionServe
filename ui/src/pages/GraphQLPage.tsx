@@ -1,32 +1,50 @@
-import { GRAPHQL_URL } from "@/lib/api";
+import { useMemo } from "react";
+import { GraphiQL, HISTORY_PLUGIN } from "graphiql";
+import { createGraphiQLFetcher } from "@graphiql/toolkit";
+import { explorerPlugin } from "@graphiql/plugin-explorer";
 
-// The bundled Strawberry GraphiQL IDE is served by the backend on GET
-// requests against the GraphQL endpoint. We embed it directly via an
-// iframe so users get the full official UI without dragging the
-// graphiql React component (and its Monaco / codemirror deps) into our
-// bundle.
+// GraphiQL 5 renders its editors with Monaco, which needs web workers
+// wired up at the bundler level. This side-effect import installs
+// ``MonacoEnvironment.getWorker`` from our own source (see
+// ``@/lib/monaco-workers`` for why we don't use
+// ``graphiql/setup-workers/vite`` directly under pnpm). It lives here
+// rather than in ``main.tsx`` so Monaco only loads inside this
+// lazily-imported chunk.
+import "@/lib/monaco-workers";
+import "graphiql/style.css";
+import "@graphiql/plugin-explorer/style.css";
+
+import { GRAPHQL_URL } from "@/lib/api";
+import { useTheme } from "@/lib/theme";
+
+// GraphiQL is now bundled directly (replacing the previous iframe to the
+// backend-served IDE). Queries go to the same ``/api/graphql`` endpoint
+// over POST; in dev Vite proxies that to the Litestar backend. The
+// backend still serves its own GraphiQL on GET as a fallback, but the
+// SPA no longer depends on it.
 export function GraphQLPage() {
+  const { resolvedTheme } = useTheme();
+  const fetcher = useMemo(
+    () => createGraphiQLFetcher({ url: GRAPHQL_URL }),
+    [],
+  );
+  // Visual query-builder panel, matching the explorer that Strawberry's
+  // backend-served GraphiQL shipped. Stable instance across renders.
+  const explorer = useMemo(() => explorerPlugin(), []);
+
   return (
-    <section className="flex h-[calc(100vh-12rem)] flex-col gap-4">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">GraphQL</h1>
-        <p className="text-zinc-600 dark:text-zinc-400">
-          GraphiQL IDE served by the backend at{" "}
-          <a
-            href={GRAPHQL_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="font-mono text-blue-600 hover:underline dark:text-blue-400"
-          >
-            {GRAPHQL_URL}
-          </a>
-        </p>
-      </header>
-      <iframe
-        title="GraphiQL"
-        src={GRAPHQL_URL}
-        className="flex-1 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+    <div className="h-[calc(100vh-9rem)] overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+      {/* ``forcedTheme`` keeps GraphiQL in lockstep with the app-wide
+          theme toggle instead of GraphiQL's own persisted setting.
+          Passing ``plugins`` *replaces* GraphiQL's default ``[HISTORY_PLUGIN]``
+          (the doc-explorer is a separate always-on referencePlugin), so we
+          re-add ``HISTORY_PLUGIN`` here alongside the explorer. Its styles
+          ship in ``graphiql/style.css``. */}
+      <GraphiQL
+        fetcher={fetcher}
+        forcedTheme={resolvedTheme}
+        plugins={[HISTORY_PLUGIN, explorer]}
       />
-    </section>
+    </div>
   );
 }

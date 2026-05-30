@@ -1,3 +1,4 @@
+import { Suspense, lazy } from "react";
 import {
   Outlet,
   createRootRoute,
@@ -7,7 +8,27 @@ import {
 import { AppLayout } from "./components/AppLayout";
 import { LandingPage } from "./pages/LandingPage";
 import { OpenAPIPage } from "./pages/OpenAPIPage";
-import { GraphQLPage } from "./pages/GraphQLPage";
+
+// GraphiQL pulls in Monaco and is several MB; lazy-load it so it only
+// downloads when the ``/graphql`` route is visited, keeping the initial
+// bundle small for the other pages.
+const GraphQLPage = lazy(() =>
+  import("./pages/GraphQLPage").then((m) => ({ default: m.GraphQLPage })),
+);
+
+function GraphQLRouteComponent() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-[calc(100vh-9rem)] items-center justify-center text-sm text-zinc-500 dark:text-zinc-400">
+          Loading GraphiQL…
+        </div>
+      }
+    >
+      <GraphQLPage />
+    </Suspense>
+  );
+}
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -32,7 +53,7 @@ const openapiRoute = createRoute({
 const graphqlRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/graphql",
-  component: GraphQLPage,
+  component: GraphQLRouteComponent,
 });
 
 export const routeTree = rootRoute.addChildren([

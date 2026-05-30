@@ -12,7 +12,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@graphiql/plugin-explorer": "^5.1.2",
+    "@graphiql/toolkit": "^0.12.0",
     "@tanstack/react-router": "^1.95.0",
+    "graphiql": "^5.2.3",
+    "graphql": "^16.14.0",
+    "monaco-editor": "0.52.2",
+    "monaco-graphql": "^1.8.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

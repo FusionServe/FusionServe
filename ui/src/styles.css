@@ -5,8 +5,21 @@
  * ``@theme`` blocks below as the SPA grows.
  */
 
+/*
+ * Class-based dark mode. By default Tailwind v4's ``dark:`` variant keys
+ * off ``prefers-color-scheme`` (OS only). Overriding it to match a
+ * ``.dark`` class on any ancestor lets the in-app ThemeToggle drive the
+ * theme manually while still defaulting to the OS preference (see the
+ * inline bootstrap in ``index.html`` and ``lib/theme.ts``).
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
 }
 
 html,
