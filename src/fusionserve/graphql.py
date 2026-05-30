@@ -225,10 +225,22 @@ def _rename_fk_fields(gql_type: type, table: Table) -> None:
     for fk in table.foreign_key_constraints:
         field = gql_type.__strawberry_definition__.get_field(fk.referred_table.name)
         if field:
-            field.graphql_name = to_camel_case(inflect.singular_noun(fk.referred_table.name))
+            new_name = to_camel_case(
+                inflect.singular_noun(fk.referred_table.name)
+                if inflect.singular_noun(fk.referred_table.name)
+                else fk.referred_table.name
+            )
+            _logger.debug("Renaming relationship field %s in table %s to %s", field.name, table.name, new_name)
+            field.graphql_name = new_name
         field = gql_type.__strawberry_definition__.get_field(_scalar_name_from_constraint(fk, fk.table.name))
         if field:
-            field.graphql_name = to_camel_case(inflect.singular_noun(_scalar_name_from_constraint(fk, fk.table.name)))
+            new_name = to_camel_case(
+                inflect.singular_noun(_scalar_name_from_constraint(fk, fk.table.name))
+                if inflect.singular_noun(_scalar_name_from_constraint(fk, fk.table.name))
+                else _scalar_name_from_constraint(fk, fk.table.name)
+            )
+            _logger.debug("Renaming relationship field %s in table %s to %s", field.name, table.name, new_name)
+            field.graphql_name = new_name
 
 
 def columns_from_selections(
