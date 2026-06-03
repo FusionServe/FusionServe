@@ -12,6 +12,7 @@ interface NavItem {
 
 const NAV: readonly NavItem[] = [
   { to: "/", label: "Overview", description: "Welcome page" },
+  { to: "/data", label: "Data", description: "Browse and edit table data" },
   { to: "/openapi", label: "OpenAPI", description: "Interactive API reference" },
   { to: "/graphql", label: "GraphQL", description: "GraphiQL IDE" },
 ];

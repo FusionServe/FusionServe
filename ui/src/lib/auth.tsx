@@ -59,6 +59,8 @@ export interface AuthContextValue {
   logout: () => void;
   /** Copy the current access token to the clipboard. Returns success. */
   copyAccessToken: () => Promise<boolean>;
+  /** Current access token, or null when anonymous. For authed API calls. */
+  getAccessToken: () => string | null;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -277,9 +279,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const getAccessToken = useCallback(() => accessTokenRef.current, []);
+
   const value = useMemo<AuthContextValue>(
-    () => ({ status, user, error, configured, login, logout, copyAccessToken }),
-    [status, user, error, configured, login, logout, copyAccessToken],
+    () => ({
+      status,
+      user,
+      error,
+      configured,
+      login,
+      logout,
+      copyAccessToken,
+      getAccessToken,
+    }),
+    [
+      status,
+      user,
+      error,
+      configured,
+      login,
+      logout,
+      copyAccessToken,
+      getAccessToken,
+    ],
   );
 
   return <AuthContext value={value}>{children}</AuthContext>;
