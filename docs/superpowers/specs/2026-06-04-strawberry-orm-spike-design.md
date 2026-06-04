@@ -225,8 +225,86 @@ The spike ends with a written recommendation appended to this spec covering:
 - Building a compatibility layer to preserve the current Hasura-style GraphQL
   API shape (the native shape is adopted instead).
 
+## Spike outcome (2026-06-04): findings & recommendation
+
+Executed on branch `strawberry-orm`. `graphql.build()` was rewritten in place
+on `strawberry-orm 0.13.0` (read + write paths); validation is in
+`tests/test_integration_strawberry_orm.py` (15 integration tests, testcontainers
+PG, all green). Environment note: run via a Podman socket forwarded over SSH
+(`DOCKER_HOST=unix:///tmp/podman-fs.sock`, `TESTCONTAINERS_RYUK_DISABLED=true`,
+`TESTCONTAINERS_HOST_OVERRIDE=<vm-ip>`).
+
+### Result against the five success criteria
+
+1. **Dynamic type generation — PASS (with friction).** `orm.type()` is driven
+   dynamically over automap classes by synthesizing one annotation per column +
+   relationship. Cyclic relationships (author↔book) work via pre-created bare
+   classes in a shared module with `__orm_filter__`/`__orm_order__` pre-seeded,
+   decorated in place. Singular PascalCase type names preserved via `name=`.
+2. **Relationship traversal — PASS.** Both to-many (`booksCollection`) and
+   to-one (`authors` scalar) resolve via the optimizer. The nested
+   author→books query issues a bounded number of SELECTs (≤4 for 2 authors —
+   no N+1).
+3. **RLS correctness — PASS (security-critical).** A single per-request
+   role-scoped `AsyncSession` exposed via `session_getter` is reused by the
+   backend for every query, optimizer load, and nested relation load.
+   Anonymous vs. authenticated visibility is correct at the root **and through
+   a nested relation load** (no leak). Session teardown is clean: the
+   `context_getter` is an async generator wired through Litestar's `Provide`.
+4. **Write parity — PASS.** create / createMany / update / updateMany / delete /
+   deleteMany work via `orm.input` / `orm.partial` / `orm.filter`,
+   RETURNING-based; the empty-`where` guardrail is preserved.
+5. **Alpha friction — documented below.**
+
+### Friction log
+
+| # | Finding | Severity | Workaround |
+|---|---------|----------|-----------|
+| 1 | Backend type map downgrades `UUID`→`str` and `JSON`→`str`. | Med | Annotate columns with concrete `python_type` instead of `auto` (done). |
+| 2 | `type()` does **not** auto-include columns; every field must be declared. | Low | Synthesize annotations from `__table__.columns` + `__mapper__.relationships` (done). |
+| 3 | No per-field rename on the dynamic `type()` path → relationships use automap default names (`booksCollection`, scalar `authors`) instead of the old singularized `books` / `author`. **Public API change.** | Med | Hand-build those fields (not done in spike); or accept new names. |
+| 4 | No description hook on dynamic `type()` → column/table SmartComment descriptions are lost on output types. | Med | Post-process `__strawberry_definition__.fields`, or hand-build fields. Not done. |
+| 5 | `from __future__ import annotations` stringifies resolver return hints, which strawberry can't resolve for locally-scoped generated types. | Low | Set `field.type_annotation` explicitly (done). |
+| 6 | A bare `list` annotation on a resolver param crashes `strawberry.mutation`. | Low | Use `Any` / concrete type; real arg type set via `_set_resolver_arguments` (done). |
+| 7 | To-one relations emit a "resolves lazily" `UserWarning`. | Low | Advisory only; traversal works. Optionally add `load=`/`disable_optimization`. |
+| 8 | Spike reaches into private backend attrs (`_filter_registry`, `_order_registry`). | Med | No public accessor in 0.13.0; fragile across alpha releases. |
+| 9 | Mutations `commit()` then `refresh()` / could resolve nested payload selections in a **new** transaction where the transaction-local `SET ROLE` no longer applies. | **High (potential RLS gap)** | Not exercised in spike. Must re-apply `set_role` post-commit or avoid post-commit loads before production. |
+| 10 | Cyclic-relationship handling relies on `strawberry.type` mutating the bare class in place. | Med | Works in 0.13.0; revalidate on upgrade. |
+
+### Effort estimate for a full migration (if "go")
+
+- Reimplement PG-function custom queries (ROW/SET/SCALAR) — **out of spike scope**.
+- Restore singularized relationship field names (hand-built relation fields).
+- Restore SmartComment descriptions on output types.
+- Decide the pagination story (old `PaginationWindow`/`totalCount` vs. relay
+  connections via `orm.connection()` vs. plain lists).
+- Resolve the post-commit RLS gap for mutation payloads (#9) — **must-fix**.
+- Remove `strawberry-sqlalchemy-mapper`; update `docs/features/graphql_api.md`.
+- Communicate/version the **public GraphQL API shape change** (native `@oneOf`
+  filters, list/connection shape, renamed relationship fields) to clients.
+
+Estimated 1–2 focused weeks for parity + the must-fix, excluding client migration.
+
+### Recommendation: **GO-LATER (conditional)**
+
+Core feasibility is proven on all five criteria with **no hard blocker and no
+RLS leak** in the read path — the security-critical concern maps cleanly onto
+strawberry-orm's "reuse the caller's session" model. However:
+
+- strawberry-orm is **alpha** ("expect breaking changes"), and the spike depends
+  on private attributes (#8) and in-place decoration behaviour (#10).
+- One **must-fix** correctness gap remains for mutation payloads (#9).
+- Several API-visible regressions (naming #3, descriptions #4) need rework.
+
+Commit to the direction and write a full migration plan, but **gate the
+production cutover on strawberry-orm reaching beta/stable** and on resolving
+#9, #3, and #4. Keep this branch as a living proof in the interim. Re-run the
+integration suite on each strawberry-orm upgrade to catch alpha churn.
+
 ## References
 
+- Spike branch implementation: `src/fusionserve/graphql.py` (this branch)
+- Spike tests: `tests/test_integration_strawberry_orm.py`
 - Current implementation: `src/fusionserve/graphql.py`
 - RLS role switching: `persistence.set_role`, `persistence.async_session`
 - strawberry-sqlalchemy maintenance thread:
