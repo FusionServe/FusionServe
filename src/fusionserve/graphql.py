@@ -41,7 +41,7 @@ import litestar
 import litestar.datastructures
 import strawberry
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import select
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from strawberry.annotation import StrawberryAnnotation
 from strawberry.extensions import QueryDepthLimiter
@@ -257,8 +257,21 @@ def build(introspection: Introspection):
         # Primary-key lookup field.
         _attach_pk_field(Query, orm_class, gql_type)
 
+    # ---- Mutation root (write path) ----
+    class Mutation:
+        """Root GraphQL mutation type for this build."""
+
+    Mutation.__annotations__ = {}
+    has_mutations = False
+    for orm_class in orm_classes:
+        if orm_class.__table__.name in introspection.views:
+            continue  # views are read-only
+        _attach_mutations(Mutation, orm, orm_class, gql_types[orm_class])
+        has_mutations = True
+
     schema = orm.schema(
         query=strawberry.type(Query),
+        mutation=strawberry.type(Mutation) if has_mutations else None,
         extensions=[QueryDepthLimiter(max_depth=_MAX_WHERE_DEPTH)],
     )
     return make_graphql_controller(
@@ -288,6 +301,7 @@ def _attach_pk_field(query_cls: type, orm_class: type, gql_type: type) -> None:
         return result
 
     field = strawberry.field(resolver=pk_resolver, description=f"Get a {pk_field_name} by primary key.")
+    field.type_annotation = StrawberryAnnotation(gql_type)
     setattr(query_cls, pk_field_name, field)
     query_cls.__annotations__[pk_field_name] = gql_type
     _set_resolver_arguments(
@@ -300,4 +314,167 @@ def _attach_pk_field(query_cls: type, orm_class: type, gql_type: type) -> None:
             )
             for pk in pks
         ],
+    )
+
+
+def _set_fields(values: object) -> dict[str, Any]:
+    """Return the explicitly-set (non-UNSET) fields of an input/partial instance."""
+    return {k: v for k, v in vars(values).items() if v is not strawberry.UNSET}
+
+
+def _pk_argument(table, pk: str) -> StrawberryArgument:
+    """Build a StrawberryArgument for a primary-key column."""
+    return StrawberryArgument(
+        python_name=pk,
+        graphql_name=None,
+        type_annotation=StrawberryAnnotation(table.primary_key.columns[pk].type.python_type),
+    )
+
+
+def _attach_mutations(mutation_cls: type, orm: StrawberryORM, orm_class: type, gql_type: type) -> None:
+    """Attach the six CRUD mutations for a table to ``mutation_cls``.
+
+    Mirrors the previous implementation's field names and RETURNING-based
+    single-roundtrip semantics, but derives input/patch types from
+    ``orm.input`` / ``orm.partial`` and filter inputs from ``orm.filter``. The
+    empty-``where`` guardrail on ``updateMany`` / ``deleteMany`` is preserved.
+    """
+    table = orm_class.__table__
+    pks = list(table.primary_key.columns.keys())
+    singular = inflect.singular_noun(table.name) or table.name
+    input_type = orm.input(orm_class)
+    patch_type = orm.partial(orm_class)
+    where_type = orm.backend._filter_registry.get(orm_class)
+
+    def _condition_from_where(where: object):
+        stmt = orm.backend.apply_filters(select(orm_class), where, orm_class)
+        return stmt.whereclause
+
+    async def create_resolver(info: strawberry.Info, input: object) -> gql_type:  # type: ignore[valid-type]
+        session = info.context.session
+        instance = orm_class(**_set_fields(input))
+        session.add(instance)
+        await session.commit()
+        await session.refresh(instance)
+        return instance
+
+    async def create_many_resolver(info: strawberry.Info, inputs: Any) -> list[gql_type]:  # type: ignore[valid-type]
+        if not inputs:
+            raise ValueError("inputs must contain at least one record to create")
+        session = info.context.session
+        rows = [_set_fields(item) for item in inputs]
+        statement = insert(orm_class).values(rows).returning(orm_class)
+        result = (await session.execute(statement)).scalars().all()
+        await session.commit()
+        return list(result)
+
+    async def update_resolver(info: strawberry.Info, patch: object, **kwids: object) -> gql_type:  # type: ignore[valid-type]
+        session = info.context.session
+        statement = select(orm_class)
+        for key, value in kwids.items():
+            statement = statement.where(getattr(orm_class, key) == value)
+        result = (await session.execute(statement)).scalar_one_or_none()
+        if result is None:
+            raise RecordNotFoundError(f"No {table.name} record matches {kwids}")
+        for key, value in _set_fields(patch).items():
+            setattr(result, key, value)
+        await session.commit()
+        await session.refresh(result)
+        return result
+
+    async def update_many_resolver(info: strawberry.Info, patch: object, where: object) -> list[gql_type]:  # type: ignore[valid-type]
+        values = _set_fields(patch)
+        if not values:
+            raise ValueError("patch must contain at least one field to update")
+        condition = _condition_from_where(where)
+        if condition is None:
+            raise ValueError("where must contain at least one filter condition for update_many")
+        session = info.context.session
+        statement = (
+            update(orm_class)
+            .where(condition)
+            .values(**values)
+            .returning(orm_class)
+            .execution_options(synchronize_session=None)
+        )
+        rows = (await session.execute(statement)).scalars().all()
+        await session.commit()
+        return list(rows)
+
+    async def delete_resolver(info: strawberry.Info, **kwids: object) -> gql_type:  # type: ignore[valid-type]
+        session = info.context.session
+        statement = (
+            delete(orm_class)
+            .where(*[getattr(orm_class, key) == value for key, value in kwids.items()])
+            .returning(orm_class)
+            .execution_options(synchronize_session=None)
+        )
+        result = (await session.execute(statement)).scalar_one_or_none()
+        if result is None:
+            raise RecordNotFoundError(f"No {table.name} record matches {kwids}")
+        await session.commit()
+        return result
+
+    async def delete_many_resolver(info: strawberry.Info, where: object) -> list[gql_type]:  # type: ignore[valid-type]
+        condition = _condition_from_where(where)
+        if condition is None:
+            raise ValueError("where must contain at least one filter condition for delete_many")
+        session = info.context.session
+        statement = delete(orm_class).where(condition).returning(orm_class).execution_options(synchronize_session=None)
+        rows = (await session.execute(statement)).scalars().all()
+        await session.commit()
+        return list(rows)
+
+    # ``from __future__ import annotations`` stringifies the resolver return
+    # hints, which strawberry cannot resolve (``gql_type`` is a local), so set
+    # each field's return type explicitly.
+    single = StrawberryAnnotation(gql_type)
+    many = StrawberryAnnotation(list[gql_type])
+
+    create_one = strawberry.mutation(resolver=create_resolver, description=f"Create a new {singular}.")
+    create_one.type_annotation = single
+    setattr(mutation_cls, f"create{to_pascal(singular)}", create_one)
+    _set_resolver_arguments(
+        create_one,
+        [StrawberryArgument("input", None, StrawberryAnnotation(input_type))],
+    )
+
+    create_many = strawberry.mutation(resolver=create_many_resolver, description=f"Create many {table.name}.")
+    create_many.type_annotation = many
+    setattr(mutation_cls, f"create{to_pascal(table.name)}", create_many)
+    _set_resolver_arguments(
+        create_many,
+        [StrawberryArgument("inputs", None, StrawberryAnnotation(list[input_type]))],
+    )
+
+    update_one = strawberry.mutation(resolver=update_resolver, description=f"Update a {singular} by primary key.")
+    update_one.type_annotation = single
+    setattr(mutation_cls, f"update{to_pascal(singular)}", update_one)
+    _set_resolver_arguments(
+        update_one,
+        [StrawberryArgument("patch", None, StrawberryAnnotation(patch_type)), *[_pk_argument(table, pk) for pk in pks]],
+    )
+
+    update_many = strawberry.mutation(resolver=update_many_resolver, description=f"Update many {table.name}.")
+    update_many.type_annotation = many
+    setattr(mutation_cls, f"update{to_pascal(table.name)}", update_many)
+    _set_resolver_arguments(
+        update_many,
+        [
+            StrawberryArgument("patch", None, StrawberryAnnotation(patch_type)),
+            StrawberryArgument("where", None, StrawberryAnnotation(where_type)),
+        ],
+    )
+
+    delete_one = strawberry.mutation(resolver=delete_resolver, description=f"Delete a {singular} by primary key.")
+    delete_one.type_annotation = single
+    setattr(mutation_cls, f"delete{to_pascal(singular)}", delete_one)
+    _set_resolver_arguments(delete_one, [_pk_argument(table, pk) for pk in pks])
+
+    delete_many = strawberry.mutation(resolver=delete_many_resolver, description=f"Delete many {table.name}.")
+    delete_many.type_annotation = many
+    setattr(mutation_cls, f"delete{to_pascal(table.name)}", delete_many)
+    _set_resolver_arguments(
+        delete_many,
+        [StrawberryArgument("where", None, StrawberryAnnotation(where_type))],
     )

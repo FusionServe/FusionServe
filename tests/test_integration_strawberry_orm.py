@@ -270,6 +270,17 @@ def test_graphql_nested_relationship(graphql_client):
     assert {"Public Alice", "Secret Alice"} <= authors["Alice"]
 
 
+def test_graphql_to_one_relationship(graphql_client):
+    """Traverse the to-one direction book -> author (named ``authors`` by automap)."""
+    body = graphql_client(
+        "{ books(order: [{ field: { id: ASC } }]) { title authors { name } } }",
+        token="alice-token",
+    )
+    assert "errors" not in body, body
+    first = body["data"]["books"][0]
+    assert first["authors"]["name"] == "Alice"
+
+
 def test_graphql_native_filter(graphql_client):
     """Native @oneOf filter narrows the result set."""
     body = graphql_client(
@@ -309,6 +320,72 @@ def test_rls_nested_anonymous_does_not_leak(graphql_client):
     # Anonymous: Alice's nested books exclude the private one.
     assert "Secret Alice" not in by_author.get("Alice", set())
     assert "Public Alice" in by_author.get("Alice", set())
+
+
+def test_mutation_create_and_delete(graphql_client):
+    """create<Singular> then delete<Singular> by primary key (RETURNING-based)."""
+    body = graphql_client('mutation { createAuthor(input: { name: "Carol" }) { id name } }', token="alice-token")
+    assert "errors" not in body, body
+    created = body["data"]["createAuthor"]
+    assert created["name"] == "Carol"
+    new_id = created["id"]
+
+    body = graphql_client(f"mutation {{ deleteAuthor(id: {new_id}) {{ name }} }}", token="alice-token")
+    assert "errors" not in body, body
+    assert body["data"]["deleteAuthor"]["name"] == "Carol"
+
+
+def test_mutation_create_many_and_delete_many(graphql_client):
+    """create<Plural> inserts many; delete<Plural> removes them via a where filter."""
+    body = graphql_client(
+        'mutation { createAuthors(inputs: [{ name: "D1" }, { name: "D2" }]) { id name } }',
+        token="alice-token",
+    )
+    assert "errors" not in body, body
+    names = {r["name"] for r in body["data"]["createAuthors"]}
+    assert {"D1", "D2"} == names
+
+    body = graphql_client(
+        'mutation { deleteAuthors(where: { field: { name: { inList: ["D1", "D2"] } } }) { name } }',
+        token="alice-token",
+    )
+    assert "errors" not in body, body
+    assert {r["name"] for r in body["data"]["deleteAuthors"]} == {"D1", "D2"}
+
+
+def test_mutation_update_by_pk(graphql_client):
+    """update<Singular> patches a single record by primary key."""
+    created = graphql_client('mutation { createAuthor(input: { name: "ToRename" }) { id } }', token="alice-token")
+    aid = created["data"]["createAuthor"]["id"]
+    try:
+        body = graphql_client(
+            f'mutation {{ updateAuthor(id: {aid}, patch: {{ name: "Renamed" }}) {{ name }} }}',
+            token="alice-token",
+        )
+        assert "errors" not in body, body
+        assert body["data"]["updateAuthor"]["name"] == "Renamed"
+    finally:
+        graphql_client(f"mutation {{ deleteAuthor(id: {aid}) {{ id }} }}", token="alice-token")
+
+
+def test_mutation_update_many_empty_where_guardrail(graphql_client):
+    """update<Plural> with a filter that resolves to no condition is rejected."""
+    body = graphql_client(
+        'mutation { updateAuthors(patch: { name: "X" }, where: { all: [] }) { id } }',
+        token="alice-token",
+    )
+    assert "errors" in body, body
+    assert "where must contain" in body["errors"][0]["message"]
+
+
+def test_mutation_delete_many_empty_where_guardrail(graphql_client):
+    """delete<Plural> with a filter that resolves to no condition is rejected."""
+    body = graphql_client(
+        "mutation { deleteAuthors(where: { all: [] }) { id } }",
+        token="alice-token",
+    )
+    assert "errors" in body, body
+    assert "where must contain" in body["errors"][0]["message"]
 
 
 def test_graphql_nested_relationship_is_bounded(configured_app, graphql_client):
