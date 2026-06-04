@@ -266,16 +266,15 @@ def test_graphql_pk_lookup(graphql_client):
 def test_graphql_nested_relationship(graphql_client):
     """Authenticated nested query traverses author -> books via the optimizer.
 
-    Note: the to-many relation field is named ``booksCollection`` (SQLAlchemy
-    automap default) rather than the old implementation's singularized
-    ``books`` — a documented naming-friction finding.
+    The to-many relation field is ``books`` and the to-one is ``author`` (WS2:
+    relationship names are singularized/pluralized at the automap layer).
     """
     body = graphql_client(
-        "{ authors(order: [{ field: { id: ASC } }]) { name booksCollection { title } } }",
+        "{ authors(order: [{ field: { id: ASC } }]) { name books { title } } }",
         token="alice-token",
     )
     assert "errors" not in body, body
-    authors = {a["name"]: {b["title"] for b in a["booksCollection"]} for a in body["data"]["authors"]}
+    authors = {a["name"]: {b["title"] for b in a["books"]} for a in body["data"]["authors"]}
     # app_author sees all of Alice's books (public + private).
     assert {"Public Alice", "Secret Alice"} <= authors["Alice"]
 
@@ -285,7 +284,7 @@ def test_filter_object_traversal_cyclic_limitation(graphql_client):
 
     ``orm.filter()`` wires a relation into its ``object`` filter only if the
     related model's filter is already registered. SQLAlchemy automap creates
-    relationships in *both* directions for every FK (``authors.booksCollection``
+    relationships in *both* directions for every FK (``authors.books``
     and ``books.authors``), forming a 2-cycle, so exactly one direction gets an
     ``object`` key depending on registration order. Here ``booksFilter`` exposes
     ``object`` (filter books by their author) but ``authorsFilter`` does not
@@ -307,7 +306,7 @@ def test_filter_object_traversal_cyclic_limitation(graphql_client):
     # The wired direction works functionally: filter books by related author.
     body = graphql_client(
         "{ books("
-        '    filter: { object: { authors: { field: { name: { exact: "Alice" } } } } }'
+        '    filter: { object: { author: { field: { name: { exact: "Alice" } } } } }'
         "    order: [{ field: { id: ASC } }]"
         "  ) { title } }",
         token="alice-token",
@@ -327,14 +326,14 @@ def test_graphql_jsonb_column(graphql_client):
 
 
 def test_graphql_to_one_relationship(graphql_client):
-    """Traverse the to-one direction book -> author (named ``authors`` by automap)."""
+    """Traverse the to-one direction book -> author (WS2: singular ``author``)."""
     body = graphql_client(
-        "{ books(order: [{ field: { id: ASC } }]) { title authors { name } } }",
+        "{ books(order: [{ field: { id: ASC } }]) { title author { name } } }",
         token="alice-token",
     )
     assert "errors" not in body, body
     first = body["data"]["books"][0]
-    assert first["authors"]["name"] == "Alice"
+    assert first["author"]["name"] == "Alice"
 
 
 def test_graphql_native_filter(graphql_client):
@@ -370,9 +369,9 @@ def test_rls_nested_anonymous_does_not_leak(graphql_client):
     The strawberry-orm docs warn that parent scoping does not flow to children;
     here the role-scoped session must make the nested books load honour RLS too.
     """
-    body = graphql_client("{ authors { name booksCollection { title } } }")
+    body = graphql_client("{ authors { name books { title } } }")
     assert "errors" not in body, body
-    by_author = {a["name"]: {b["title"] for b in a["booksCollection"]} for a in body["data"]["authors"]}
+    by_author = {a["name"]: {b["title"] for b in a["books"]} for a in body["data"]["authors"]}
     # Anonymous: Alice's nested books exclude the private one.
     assert "Secret Alice" not in by_author.get("Alice", set())
     assert "Public Alice" in by_author.get("Alice", set())
@@ -497,7 +496,7 @@ def test_graphql_nested_relationship_is_bounded(configured_app, graphql_client):
     sync_engine = persistence.engine.sync_engine
     event.listen(sync_engine, "after_cursor_execute", _count)
     try:
-        body = graphql_client("{ authors { name booksCollection { title } } }", token="alice-token")
+        body = graphql_client("{ authors { name books { title } } }", token="alice-token")
     finally:
         event.remove(sync_engine, "after_cursor_execute", _count)
     assert "errors" not in body, body

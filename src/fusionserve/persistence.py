@@ -14,9 +14,6 @@ from sqlalchemy.ext.automap import (
     automap_base,
 )
 from sqlalchemy.ext.automap import (
-    name_for_collection_relationship as _default_collection_name,
-)
-from sqlalchemy.ext.automap import (
     name_for_scalar_relationship as _default_scalar_name,
 )
 from sqlalchemy.orm import DeclarativeMeta, load_only
@@ -223,7 +220,14 @@ def _name_for_scalar_relationship(base, local_cls, referred_cls, constraint: For
     referred_table = referred_cls.__table__
     siblings = _fk_constraints_to(local_table, referred_table)
     if len(siblings) <= 1:
-        return _default_scalar_name(base, local_cls, referred_cls, constraint)
+        # Single FK: name the to-one relationship after the singular of the
+        # referred table (e.g. ``books.author`` for FK -> ``authors``) so the
+        # GraphQL field reads naturally, instead of automap's plural default.
+        derived = inflect.singular_noun(referred_table.name) or referred_table.name
+        taken = set(local_table.columns.keys())
+        if hasattr(local_cls, "__mapper__"):
+            taken |= set(local_cls.__mapper__.relationships.keys())
+        return _disambiguate(derived, taken)
     derived = _scalar_name_from_constraint(constraint, local_table.name) or _scalar_name_from_columns(constraint)
     if not derived:
         derived = _default_scalar_name(base, local_cls, referred_cls, constraint)
@@ -247,7 +251,12 @@ def _name_for_collection_relationship(base, local_cls, referred_cls, constraint:
     target_table = local_cls.__table__
     siblings = _fk_constraints_to(source_table, target_table)
     if len(siblings) <= 1:
-        return _default_collection_name(base, local_cls, referred_cls, constraint)
+        # Single FK: name the to-many relationship after the (plural) source
+        # table (e.g. ``authors.books``) instead of automap's ``books_collection``.
+        taken = set(target_table.columns.keys())
+        if hasattr(local_cls, "__mapper__"):
+            taken |= set(local_cls.__mapper__.relationships.keys())
+        return _disambiguate(source_table.name, taken)
     scalar = (
         _scalar_name_from_constraint(constraint, source_table.name)
         or _scalar_name_from_columns(constraint)
