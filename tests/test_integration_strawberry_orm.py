@@ -271,6 +271,42 @@ def test_graphql_nested_relationship(graphql_client):
     assert {"Public Alice", "Secret Alice"} <= authors["Alice"]
 
 
+def test_filter_object_traversal_cyclic_limitation(graphql_client):
+    """Pin the strawberry-orm 0.13.0 cyclic-relation `object`-filter limitation.
+
+    ``orm.filter()`` wires a relation into its ``object`` filter only if the
+    related model's filter is already registered. SQLAlchemy automap creates
+    relationships in *both* directions for every FK (``authors.booksCollection``
+    and ``books.authors``), forming a 2-cycle, so exactly one direction gets an
+    ``object`` key depending on registration order. Here ``booksFilter`` exposes
+    ``object`` (filter books by their author) but ``authorsFilter`` does not
+    (cannot filter authors by their books). See the spec's friction log.
+
+    This test locks in the current behaviour; if a future strawberry-orm release
+    wires both directions, it will fail and prompt a docs/update.
+    """
+    body = graphql_client(
+        '{ b: __type(name: "booksFilter") { inputFields { name } }'
+        '  a: __type(name: "authorsFilter") { inputFields { name } } }'
+    )
+    assert "errors" not in body, body
+    books_fields = {f["name"] for f in body["data"]["b"]["inputFields"]}
+    authors_fields = {f["name"] for f in body["data"]["a"]["inputFields"]}
+    assert "object" in books_fields, "expected books->author object traversal"
+    assert "object" not in authors_fields, "authors->books object traversal unexpectedly wired"
+
+    # The wired direction works functionally: filter books by related author.
+    body = graphql_client(
+        "{ books("
+        '    filter: { object: { authors: { field: { name: { exact: "Alice" } } } } }'
+        "    order: [{ field: { id: ASC } }]"
+        "  ) { title } }",
+        token="alice-token",
+    )
+    assert "errors" not in body, body
+    assert {r["title"] for r in body["data"]["books"]} == {"Public Alice", "Secret Alice"}
+
+
 def test_graphql_jsonb_column(graphql_client):
     """A JSONB column is exposed via the JSON scalar (not a bare dict)."""
     body = graphql_client(

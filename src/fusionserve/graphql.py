@@ -199,6 +199,13 @@ def build(introspection: Introspection):
     Query.__annotations__ = {}
     Mutation.__annotations__ = {}
 
+    # Iterate in a stable, name-sorted order. ``automap``'s class collection has
+    # no guaranteed iteration order across processes, and the order determines
+    # which side of a bidirectional relationship gets its ``object`` filter wired
+    # (see the spec's friction log). Sorting keeps the generated schema shape
+    # deterministic across restarts/deploys.
+    orm_classes = sorted(introspection.base.classes, key=lambda c: c.__table__.name)
+
     # ---- Loop A: register filter/order types and pre-create bare type classes. ----
     # The backend keys filter/order types in per-instance registries; cyclic
     # relationships (e.g. author.books / book.author) mean a type being decorated
@@ -211,7 +218,7 @@ def build(introspection: Introspection):
     generated_module = _types_mod.ModuleType(_GENERATED_MODULE)
     sys.modules[_GENERATED_MODULE] = generated_module
     bare_types: dict[type, type] = {}
-    for orm_class in introspection.base.classes:
+    for orm_class in orm_classes:
         orm.filter(orm_class)
         orm.order(orm_class)
         name = _gql_type_name(orm_class)
@@ -228,7 +235,7 @@ def build(introspection: Introspection):
     # type's Query/Mutation fields need only that type's own decorated ``gql_type``.
     gql_types: dict[type, type] = {}
     has_mutations = False
-    for orm_class in introspection.base.classes:
+    for orm_class in orm_classes:
         cls = bare_types[orm_class]
         table_name = orm_class.__table__.name
         annotations: dict[str, Any] = {}
