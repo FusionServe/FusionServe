@@ -277,35 +277,38 @@ PG, all green). Environment note: run via a Podman socket forwarded over SSH
 | 10 | Cyclic-relationship handling relies on `strawberry.type` mutating the bare class in place. | Med | Works in 0.13.0; revalidate on upgrade. |
 | 11 | Nested relation (`object`) filters are wired for only **one direction** of a bidirectional relationship. `orm.filter()` reads related filters from the registry at build time; SQLAlchemy automap creates relationships in both directions for every FK (a 2-cycle), so only the model registered *second* gets the `object` key. Example: `booksFilter` can filter by `author`, but `authorsFilter` cannot filter by `books`. A topological sort does **not** help (the pair is mutually dependent), and re-registering to complete both directions produces duplicate same-named filter types. Worse, `automap`'s class iteration order is **not stable across processes**, so which direction is wired could flip between deploys. | Med | `build()` now iterates `base.classes` sorted by table name, so the wired direction is **deterministic** (alphabetically-first model registered first → its FK-target's filter gets the `object` key). Accepted as a library limitation in 0.13.0 and pinned by `test_filter_object_traversal_cyclic_limitation`. No clean workaround for full bidirectional traversal; revisit when the library supports it. |
 
-### Effort estimate for a full migration (if "go")
+### Migration workstreams — status (all implemented on this branch)
 
-- Reimplement PG-function custom queries (ROW/SET/SCALAR) — **out of spike scope**.
-- Restore singularized relationship field names (hand-built relation fields).
-- Restore SmartComment descriptions on output types.
-- Decide the pagination story (old `PaginationWindow`/`totalCount` vs. relay
-  connections via `orm.connection()` vs. plain lists).
-- Resolve the post-commit RLS gap for mutation payloads (#9) — **must-fix**.
-- Remove `strawberry-sqlalchemy-mapper`; update `docs/features/graphql_api.md`.
-- Communicate/version the **public GraphQL API shape change** (native `@oneOf`
-  filters, list/connection shape, renamed relationship fields) to clients.
+The full parity migration was executed on this branch as seven workstreams:
 
-Estimated 1–2 focused weeks for parity + the must-fix, excluding client migration.
+- **WS1** — per-transaction RLS role re-application (resolves must-fix #9). ✅
+- **WS2** — singular/plural relationship names at the automap layer (#3). ✅
+- **WS3** — SmartComment type/field descriptions (#4). ✅
+- **WS4** — relay connections for single-PK tables (`edges`/`node`/`pageInfo`/`totalCount`/`first`/`after`); composite-PK fallback to lists. ✅
+- **WS5** — PG-function custom queries (ROW/SET/SCALAR) under RLS. ✅
+- **WS6** — contain + pin the private `_filter_registry`/`_order_registry` access (#8). ✅
+- **WS7** — remove `strawberry-sqlalchemy-mapper`; update `docs/features/graphql_api.md` + this spec. ✅
 
-### Recommendation: **GO-LATER (conditional)**
+Coverage: 22 integration tests (testcontainers PG) + 3 no-DB contract tests, all green.
 
-Core feasibility is proven on all five criteria with **no hard blocker and no
-RLS leak** in the read path — the security-critical concern maps cleanly onto
-strawberry-orm's "reuse the caller's session" model. However:
+Remaining (not blockers): mutation-payload nested-relation loads (#12) and the
+relay GlobalID ↔ raw-int-PK reconciliation (#13); plus communicating the
+**public GraphQL API shape change** (native `@oneOf` filters, relay connection
+shape, renamed relationship fields) to clients.
 
-- strawberry-orm is **alpha** ("expect breaking changes"), and the spike depends
-  on private attributes (#8) and in-place decoration behaviour (#10).
-- One **must-fix** correctness gap remains for mutation payloads (#9).
-- Several API-visible regressions (naming #3, descriptions #4) need rework.
+### Recommendation: **GO-LATER (conditional) — blockers now cleared**
 
-Commit to the direction and write a full migration plan, but **gate the
-production cutover on strawberry-orm reaching beta/stable** and on resolving
-#9, #3, and #4. Keep this branch as a living proof in the interim. Re-run the
-integration suite on each strawberry-orm upgrade to catch alpha churn.
+All five success criteria pass, with **no RLS leak**, and the previously-open
+must-fix (#9) and API-visible regressions (#3, #4) are resolved on this branch.
+The remaining gate is **strawberry-orm's alpha status**: the implementation
+still depends on private attributes (#8, now guarded) and in-place decoration
+behaviour (#10).
+
+Recommendation: keep this branch as the migration implementation, and **gate
+the production cutover on strawberry-orm reaching beta/stable**. Before cutover,
+resolve #12/#13 and finalize client communication of the API-shape change.
+Re-run the integration + contract suites on each strawberry-orm upgrade to
+catch alpha churn (the contract tests will fail loudly on private-API drift).
 
 ## References
 

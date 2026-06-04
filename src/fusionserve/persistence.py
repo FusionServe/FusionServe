@@ -422,8 +422,8 @@ async def set_role(session: AsyncSession, user: User | None):
 #: arguments or return type are not in this map are skipped at introspection
 #: time with a logged warning. ``json`` / ``jsonb`` use Strawberry's built-in
 #: ``JSON`` scalar (lossless, arbitrary JSON) — only for function param /
-#: return types; column-level json/jsonb mapping stays with the upstream
-#: ``strawberry-sqlalchemy-mapper``.
+#: return types; column-level json/jsonb mapping is handled in
+#: ``fusionserve.graphql`` (``dict``/``list`` python types → the JSON scalar).
 _PG_TO_PY: dict[str, type] = {
     "int2": int,
     "int4": int,

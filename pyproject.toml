@@ -42,7 +42,6 @@ dependencies = [
     "python-multipart",
     "sqlalchemy",
     "strawberry-graphql",
-    "strawberry-sqlalchemy-mapper>=0.8.0",
     "strawberry-orm[sqlalchemy]",
     "typing-extensions",
     "uvicorn[standard]>=0.48.0",
