@@ -1,0 +1,247 @@
+"""Integration harness for the strawberry-orm migration spike.
+
+Brings up a disposable PostgreSQL via ``testcontainers`` seeded with a
+plural parent/child pair (``authors`` / ``books``) plus an FK, a view
+(``book_summaries``), real PostgreSQL roles (``app_anon`` / ``app_author``),
+and a row-level-security policy on ``books`` keyed on
+``current_setting('role')``. ``persistence.set_role`` issues
+``set_config('role', …)`` which is equivalent to ``SET ROLE``, so the policy
+sees the switched role.
+
+Runs only when ``RUN_INTEGRATION=1`` and a Docker daemon is reachable.
+
+Phase 1 of the spike plan validates the harness against the *current*
+(strawberry-sqlalchemy) implementation as a baseline; later phases add the
+read/RLS/write assertions against the strawberry-orm rewrite.
+"""
+
+from __future__ import annotations
+
+import os
+import uuid
+
+import pytest
+
+pytestmark = pytest.mark.integration
+
+if os.environ.get("RUN_INTEGRATION") != "1":
+    pytest.skip(
+        "RUN_INTEGRATION!=1 — set RUN_INTEGRATION=1 to run docker-backed tests",
+        allow_module_level=True,
+    )
+
+# Imports below the skip so the docker / testcontainers tree isn't loaded for
+# unit-test runs.
+from pydantic import SecretStr  # noqa: E402
+from sqlalchemy import create_engine, text  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from testcontainers.postgres import PostgresContainer  # noqa: E402
+
+#: Bearer token -> role mapping honoured by the patched auth handler. The
+#: ``role`` becomes the PostgreSQL role via ``set_role`` -> ``SET ROLE``.
+_TOKEN_ROLES = {"alice-token": "app_author"}
+
+
+@pytest.fixture(scope="module")
+def monkeypatch_module():
+    """Module-scoped variant of pytest's ``monkeypatch``."""
+    from _pytest.monkeypatch import MonkeyPatch
+
+    mp = MonkeyPatch()
+    yield mp
+    mp.undo()
+
+
+@pytest.fixture(scope="module")
+def postgres_container():
+    """Spin up a throwaway PostgreSQL 16 container seeded for the spike.
+
+    Creates the ``app_public`` schema, two plural tables joined by an FK, a
+    view, two NOLOGIN roles, grants, and an RLS policy on ``books`` so that
+    ``app_anon`` only sees ``visibility = 'public'`` rows while ``app_author``
+    sees everything.
+    """
+    from fusionserve.config import settings
+
+    schema = settings.pg_app_schema
+    with PostgresContainer("postgres:16-alpine") as container:
+        url = container.get_connection_url().replace("postgresql+psycopg2", "postgresql+psycopg")
+        engine = create_engine(url, future=True)
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+                conn.execute(text("CREATE ROLE app_anon NOLOGIN"))
+                conn.execute(text("CREATE ROLE app_author NOLOGIN"))
+                conn.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO app_anon, app_author'))
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE TABLE "{schema}".authors (
+                            id serial PRIMARY KEY,
+                            name text NOT NULL
+                        );
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE TABLE "{schema}".books (
+                            id serial PRIMARY KEY,
+                            author_id integer NOT NULL REFERENCES "{schema}".authors(id),
+                            title text NOT NULL,
+                            visibility text NOT NULL DEFAULT 'private'
+                        );
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE VIEW "{schema}".book_summaries AS
+                            SELECT b.id, b.title, a.name AS author_name
+                            FROM "{schema}".books b
+                            JOIN "{schema}".authors a ON a.id = b.author_id;
+                        """
+                    )
+                )
+                # Smart comment declaring the view's logical PK so introspection
+                # maps it as a read-only type (undeclared views stay unmapped).
+                conn.execute(
+                    text(
+                        f"""
+                        COMMENT ON VIEW "{schema}".book_summaries IS '---
+primary_key: id
+---
+Joined view of books and their author names.';
+                        """
+                    )
+                )
+                # Grants: app_author full CRUD, app_anon read-only.
+                conn.execute(
+                    text(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "{schema}" TO app_author')
+                )
+                conn.execute(text(f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "{schema}" TO app_author'))
+                conn.execute(
+                    text(f'GRANT SELECT ON "{schema}".authors, "{schema}".books, "{schema}".book_summaries TO app_anon')
+                )
+                # RLS on books: anon sees only public rows; app_author sees all.
+                conn.execute(text(f'ALTER TABLE "{schema}".books ENABLE ROW LEVEL SECURITY'))
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE POLICY books_visibility ON "{schema}".books
+                            FOR SELECT
+                            USING (
+                                current_setting('role', true) = 'app_author'
+                                OR visibility = 'public'
+                            );
+                        """
+                    )
+                )
+                # Seed rows.
+                conn.execute(text(f"""INSERT INTO "{schema}".authors (id, name) VALUES (1, 'Alice'), (2, 'Bob')"""))
+                conn.execute(
+                    text(
+                        f"""
+                        INSERT INTO "{schema}".books (author_id, title, visibility) VALUES
+                            (1, 'Public Alice', 'public'),
+                            (1, 'Secret Alice', 'private'),
+                            (2, 'Public Bob', 'public');
+                        """
+                    )
+                )
+                conn.execute(text(f"SELECT setval(pg_get_serial_sequence('\"{schema}\".authors', 'id'), 2, true)"))
+        finally:
+            engine.dispose()
+        yield container
+
+
+@pytest.fixture(scope="module")
+def configured_app(postgres_container, monkeypatch_module):
+    """Point ``fusionserve.*`` at the live container and stub auth.
+
+    Rebinds the async engine/session captured by ``persistence`` and
+    ``graphql`` (earlier unit tests may have imported them against an
+    unreachable DSN), sets ``anonymous_role`` to the seeded ``app_anon`` role,
+    and replaces ``auth.retrieve_user_handler`` with a token->role stub so
+    tests can drive authenticated requests without a real JWKS endpoint.
+    """
+    from fusionserve.config import settings
+
+    monkeypatch_module.setattr(settings, "pg_host", postgres_container.get_container_host_ip())
+    monkeypatch_module.setattr(settings, "pg_port", int(postgres_container.get_exposed_port(5432)))
+    monkeypatch_module.setattr(settings, "pg_user", postgres_container.username)
+    monkeypatch_module.setattr(settings, "pg_password", SecretStr(postgres_container.password))
+    monkeypatch_module.setattr(settings, "pg_database", postgres_container.dbname)
+    monkeypatch_module.setattr(settings, "anonymous_role", "app_anon")
+
+    async_url = (
+        f"postgresql+asyncpg://{settings.pg_user}:{settings.pg_password.get_secret_value()}@"
+        f"{settings.pg_host}:{settings.pg_port}/{settings.pg_database}"
+    )
+    new_engine = create_async_engine(async_url, pool_pre_ping=True)
+    new_session = async_sessionmaker(new_engine, expire_on_commit=False)
+
+    from fusionserve import auth, graphql, persistence
+
+    monkeypatch_module.setattr(persistence, "engine", new_engine)
+    monkeypatch_module.setattr(persistence, "async_session", new_session)
+    monkeypatch_module.setattr(graphql, "async_session", new_session)
+
+    async def fake_retrieve_user_handler(token: str):
+        role = _TOKEN_ROLES.get(token)
+        if role is None:
+            return None
+        return auth.User(
+            id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+            username="alice",
+            email="alice@example.com",
+            role=role,
+        )
+
+    monkeypatch_module.setattr(auth, "retrieve_user_handler", fake_retrieve_user_handler)
+
+    return settings
+
+
+@pytest.fixture(scope="module")
+def graphql_client(configured_app):
+    """Yield a ``post(query, token=None)`` helper bound to a live TestClient."""
+    from litestar.testing import TestClient
+
+    from fusionserve.main import app
+
+    base = configured_app.base_path
+
+    with TestClient(app=app) as client:
+
+        def post(query: str, token: str | None = None, variables: dict | None = None) -> dict:
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            payload: dict = {"query": query}
+            if variables is not None:
+                payload["variables"] = variables
+            response = client.post(f"{base}/graphql", json=payload, headers=headers)
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        yield post
+
+
+def test_introspect_finds_tables_and_view(configured_app):
+    """``introspect()`` reflects both plural tables and classifies the view."""
+    from fusionserve import persistence
+
+    introspection = persistence.introspect()
+    assert "authors" in introspection.base.classes
+    assert "books" in introspection.base.classes
+    assert "book_summaries" in introspection.views
+
+
+def test_graphql_baseline_anonymous_authors(graphql_client):
+    """Baseline: the current implementation serves a list query anonymously."""
+    body = graphql_client("{ authors { nodes { id name } totalCount } }")
+    assert "errors" not in body, body
+    nodes = body["data"]["authors"]["nodes"]
+    names = {row["name"] for row in nodes}
+    assert {"Alice", "Bob"} <= names
