@@ -126,11 +126,6 @@ async def custom_context_getter(request: litestar.Request) -> AsyncGenerator[Cus
         await session.close()
 
 
-def _session_from_context(info: strawberry.Info) -> AsyncSession:
-    """Return the per-request role-scoped session for the strawberry-orm backend."""
-    return info.context.session
-
-
 @strawberry.experimental.pydantic.type(model=auth.User, all_fields=True, description="The authenticated user from JWT")
 class JWTUser:
     """GraphQL projection of the authenticated :class:`fusionserve.auth.User`."""
@@ -186,31 +181,39 @@ def build(introspection: Introspection):
     """
     orm = StrawberryORM.for_sqlalchemy(
         dialect="postgresql",
-        session_getter=_session_from_context,
+        session_getter=lambda info: info.context.session,
         default_query_limit=settings.default_page_size,
         max_filter_depth=_MAX_WHERE_DEPTH,
     )
-    base = introspection.base
-    orm_classes = list(base.classes)
 
-    # ---- Pass 1: register filter + order types for every model. ----
-    # The backend keys these in per-instance registries; relation (`object`)
-    # traversal only wires a relation if the related model's filter/order is
-    # already registered, so register them all before building any type.
-    for orm_class in orm_classes:
-        orm.filter(orm_class)
-        orm.order(orm_class)
+    class Query:
+        """Root GraphQL query type for this build."""
 
-    # ---- Pre-create bare type classes in a shared module. ----
-    # Cyclic relationships (e.g. author.books / book.author) mean one direction
-    # always references a not-yet-decorated type. Creating all bare classes up
-    # front (and pre-seeding their orm metadata) lets the backend's relation
-    # wiring resolve every reference; ``strawberry.type`` then decorates each
-    # class in place, so the annotations already point at the final types.
+        @strawberry.field
+        def current_user(self, info: strawberry.Info[CustomHTTPContextType, None]) -> JWTUser | None:
+            return info.context.request.user or None
+
+    class Mutation:
+        """Root GraphQL mutation type for this build."""
+
+    Query.__annotations__ = {}
+    Mutation.__annotations__ = {}
+
+    # ---- Loop A: register filter/order types and pre-create bare type classes. ----
+    # The backend keys filter/order types in per-instance registries; cyclic
+    # relationships (e.g. author.books / book.author) mean a type being decorated
+    # references another not-yet-decorated type. Registering filters/orders and
+    # creating *all* bare classes (with their orm metadata pre-seeded) before any
+    # decoration lets the backend's relation wiring resolve every reference;
+    # ``strawberry.type`` later decorates each bare class in place, so annotations
+    # already point at the final types. Each iteration only reads its own registry
+    # entry, so iteration order is irrelevant here.
     generated_module = _types_mod.ModuleType(_GENERATED_MODULE)
     sys.modules[_GENERATED_MODULE] = generated_module
     bare_types: dict[type, type] = {}
-    for orm_class in orm_classes:
+    for orm_class in introspection.base.classes:
+        orm.filter(orm_class)
+        orm.order(orm_class)
         name = _gql_type_name(orm_class)
         cls = type(name, (), {})
         cls.__module__ = _GENERATED_MODULE
@@ -220,10 +223,14 @@ def build(introspection: Introspection):
         setattr(generated_module, name, cls)
         bare_types[orm_class] = cls
 
-    # ---- Pass 2: synthesize annotations and decorate each type in place. ----
+    # ---- Loop B: decorate each type in place and attach its root fields. ----
+    # All bare classes exist now, so relationship annotations resolve and each
+    # type's Query/Mutation fields need only that type's own decorated ``gql_type``.
     gql_types: dict[type, type] = {}
-    for orm_class in orm_classes:
+    has_mutations = False
+    for orm_class in introspection.base.classes:
         cls = bare_types[orm_class]
+        table_name = orm_class.__table__.name
         annotations: dict[str, Any] = {}
         for column in orm_class.__table__.columns:
             annotations[column.name] = _column_annotation(column)
@@ -233,27 +240,15 @@ def build(introspection: Introspection):
                 continue
             annotations[rel_name] = list[target] if rel.uselist else target | None
         cls.__annotations__ = annotations
-        gql_types[orm_class] = orm.type(
+        gql_type = orm.type(
             orm_class,
             name=_gql_type_name(orm_class),
             filters=cls.__orm_filter__,
             order=cls.__orm_order__,
         )(cls)
+        gql_types[orm_class] = gql_type
 
-    # ---- Query root ----
-    class Query:
-        """Root GraphQL query type for this build."""
-
-        @strawberry.field
-        def current_user(self, info: strawberry.Info[CustomHTTPContextType, None]) -> JWTUser | None:
-            return info.context.request.user or None
-
-    Query.__annotations__ = {}
-    for orm_class in orm_classes:
-        table_name = orm_class.__table__.name
-        gql_type = gql_types[orm_class]
-
-        # List field: orm.field() builds a list resolver with filter/order args.
+        # ---- Query: list field (orm.field() builds the list resolver). ----
         list_field = orm.field(description=f"List {table_name} with filtering and ordering.")
         Query.__annotations__[table_name] = list[gql_type]
         setattr(Query, table_name, list_field)
@@ -261,20 +256,13 @@ def build(introspection: Introspection):
         # ``__set_name__`` — trigger it manually since we assign post-hoc.
         list_field.__set_name__(Query, table_name)
 
-        # Primary-key lookup field.
+        # ---- Query: primary-key lookup field. ----
         _attach_pk_field(Query, orm_class, gql_type)
 
-    # ---- Mutation root (write path) ----
-    class Mutation:
-        """Root GraphQL mutation type for this build."""
-
-    Mutation.__annotations__ = {}
-    has_mutations = False
-    for orm_class in orm_classes:
-        if orm_class.__table__.name in introspection.views:
-            continue  # views are read-only
-        _attach_mutations(Mutation, orm, orm_class, gql_types[orm_class])
-        has_mutations = True
+        # ---- Mutations (views are read-only). ----
+        if table_name not in introspection.views:
+            _attach_mutations(Mutation, orm, orm_class, gql_type)
+            has_mutations = True
 
     schema = orm.schema(
         query=strawberry.type(Query),
