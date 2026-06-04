@@ -68,8 +68,8 @@ def test_parse_comments_with_frontmatter_splits_metadata_and_content():
     table = _make_table(comment=comment)
     result = SmartComment.from_object(table)
     assert result.metadata is not None
-    # Unknown keys are preserved verbatim via ``extra="allow"``.
-    assert result.metadata.model_extra == {"role": "admin", "label": "Users"}
+    # Unknown keys are dropped via ``extra="ignore"``.
+    assert not result.metadata.model_extra
     assert result.metadata.primary_key is None
     assert result.content == "The users table.\n"
 
