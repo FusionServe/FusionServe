@@ -72,7 +72,11 @@ def postgres_container():
                 conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
                 conn.execute(text("CREATE ROLE app_anon NOLOGIN"))
                 conn.execute(text("CREATE ROLE app_author NOLOGIN"))
-                conn.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO app_anon, app_author'))
+                # app_writer can write but, like anon, only *reads* public books
+                # (RLS policy privileges app_author only) — used to prove the
+                # role survives a mutation's post-commit nested loads.
+                conn.execute(text("CREATE ROLE app_writer NOLOGIN"))
+                conn.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO app_anon, app_author, app_writer'))
                 conn.execute(
                     text(
                         f"""
@@ -118,11 +122,16 @@ Joined view of books and their author names.';
                         """
                     )
                 )
-                # Grants: app_author full CRUD, app_anon read-only.
+                # Grants: app_author + app_writer full CRUD, app_anon read-only.
                 conn.execute(
-                    text(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "{schema}" TO app_author')
+                    text(
+                        f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES "
+                        f'IN SCHEMA "{schema}" TO app_author, app_writer'
+                    )
                 )
-                conn.execute(text(f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "{schema}" TO app_author'))
+                conn.execute(
+                    text(f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "{schema}" TO app_author, app_writer')
+                )
                 conn.execute(
                     text(f'GRANT SELECT ON "{schema}".authors, "{schema}".books, "{schema}".book_summaries TO app_anon')
                 )
@@ -433,6 +442,44 @@ def test_mutation_delete_many_empty_where_guardrail(graphql_client):
     )
     assert "errors" in body, body
     assert "where must contain" in body["errors"][0]["message"]
+
+
+async def test_ws1_role_reapplied_on_each_transaction(configured_app):
+    """WS1: the ``after_begin`` hook re-applies the role to post-commit transactions.
+
+    Directly exercises the mechanism: set ``app_writer``, read the role,
+    ``commit`` (ending the transaction-local config), then read again in the new
+    transaction. Without re-application the second read sees ``none`` (the GUC
+    default); with it, ``app_writer`` persists.
+
+    Builds its own engine/session in the running event loop (the module engine
+    belongs to a different loop, which asyncpg rejects).
+    """
+    import uuid
+
+    from sqlalchemy import event, text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from fusionserve import auth, graphql, persistence
+
+    s = configured_app
+    url = f"postgresql+asyncpg://{s.pg_user}:{s.pg_password.get_secret_value()}@{s.pg_host}:{s.pg_port}/{s.pg_database}"
+    engine = create_async_engine(url)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    user = auth.User(id=uuid.UUID("00000000-0000-0000-0000-000000000009"), username="w", role="app_writer")
+    session = maker()
+    session.info["fs_user"] = user
+    event.listen(session.sync_session, "after_begin", graphql._reapply_role_on_begin)
+    try:
+        await persistence.set_role(session, user)
+        first = (await session.execute(text("SELECT current_setting('role', true)"))).scalar()
+        assert first == "app_writer"
+        await session.commit()
+        second = (await session.execute(text("SELECT current_setting('role', true)"))).scalar()
+        assert second == "app_writer", f"role not re-applied post-commit: {second!r}"
+    finally:
+        await session.close()
+        await engine.dispose()
 
 
 def test_graphql_nested_relationship_is_bounded(configured_app, graphql_client):

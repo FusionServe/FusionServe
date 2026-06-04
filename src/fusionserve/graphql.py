@@ -41,7 +41,7 @@ import litestar
 import litestar.datastructures
 import strawberry
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, event, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from strawberry.annotation import StrawberryAnnotation
 from strawberry.extensions import QueryDepthLimiter
@@ -58,7 +58,7 @@ from strawberry_orm import StrawberryORM
 from . import auth
 from .config import settings
 from .models import Introspection, RecordNotFoundError
-from .persistence import async_session, inflect, set_role
+from .persistence import async_session, inflect, role_config_statement, set_role
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -97,20 +97,39 @@ class CustomWSContextType(WebSocketContextType, CustomContext):
     socket: litestar.WebSocket[auth.User, Any, litestar.datastructures.State]
 
 
+def _reapply_role_on_begin(session, transaction, connection) -> None:
+    """``after_begin`` hook: re-apply the request's role to each new transaction.
+
+    The role set by :func:`fusionserve.persistence.set_role` is transaction-local
+    (``is_local=True``), so it is discarded when a transaction ends — including
+    the implicit commit a mutation performs. Mutations then do post-commit work
+    (``refresh``, and nested mutation-payload field resolution) in a *new*
+    transaction, which would otherwise run under the wrong role and bypass RLS.
+
+    Registering this on the session's sync session re-issues the role
+    configuration synchronously on the connection backing every transaction
+    (initial and post-commit alike). The authenticated user is read from
+    ``session.info`` where :func:`custom_context_getter` stashes it.
+    """
+    user = session.info.get("fs_user")
+    connection.execute(role_config_statement(user))
+
+
 async def custom_context_getter(request: litestar.Request) -> AsyncGenerator[CustomContext]:
     """Open one role-scoped async session per GraphQL request.
 
     A single :class:`~sqlalchemy.ext.asyncio.AsyncSession` is opened and the
-    request user's PostgreSQL role is applied via
-    :func:`fusionserve.persistence.set_role` before any resolver runs. The
-    session is exposed on the context so the strawberry-orm backend's
-    ``session_getter`` can reuse it for the whole request, then closed when the
-    request completes.
+    request user is stashed on ``session.info`` so the ``after_begin`` hook
+    (:func:`_reapply_role_on_begin`) applies the user's PostgreSQL role to
+    **every** transaction the session opens during the request — the initial
+    one and any post-commit transaction created by mutations. The session is
+    exposed on the context so the strawberry-orm backend's ``session_getter``
+    reuses it for the whole request, then closed when the request completes.
 
-    Strawberry's Litestar integration wires this via ``litestar.di.Provide``,
-    which honours async-generator dependencies — so yielding the context and
-    closing the session in ``finally`` gives correct per-request lifecycle
-    without leaking pooled connections.
+    The role configuration is transaction-local, so the pooled connection never
+    carries a role back to the pool. Strawberry's Litestar integration wires
+    this via ``litestar.di.Provide``, which honours async-generator
+    dependencies, giving correct per-request session lifecycle.
 
     Args:
         request: The incoming Litestar HTTP request.
@@ -119,6 +138,10 @@ async def custom_context_getter(request: litestar.Request) -> AsyncGenerator[Cus
         A :class:`CustomContext` wrapping the role-scoped session.
     """
     session = async_session()
+    session.info["fs_user"] = request.user
+    event.listen(session.sync_session, "after_begin", _reapply_role_on_begin)
+    # Apply immediately so the role is set even if the first statement does not
+    # implicitly begin via the ORM event (defensive; after_begin also covers it).
     await set_role(session, request.user)
     try:
         yield CustomContext(session=session)

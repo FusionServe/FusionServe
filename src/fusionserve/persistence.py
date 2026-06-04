@@ -370,23 +370,41 @@ def introspect() -> Introspection:
     return Introspection(base=base, functions=functions, views=views)
 
 
-async def set_role(session: AsyncSession, user: User | None):
+def role_config_statement(user: User | None) -> Select:
+    """Build the ``SELECT set_config(...)`` statement that applies a user's role.
+
+    The configuration is **transaction-local** (``is_local=True``), so it is
+    automatically discarded when the transaction ends — keeping pooled
+    connections from carrying a role across requests. Because it is
+    transaction-scoped, it must be re-applied on every new transaction within a
+    request (see the GraphQL ``after_begin`` hook in
+    :mod:`fusionserve.graphql`); a single ``await session.execute`` covers the
+    common single-transaction case (see :func:`set_role`).
+
+    Args:
+        user: The authenticated user, or ``None`` for the anonymous role.
+
+    Returns:
+        A SQLAlchemy ``Select`` wrapping the ``set_config`` calls.
+    """
     if not user:
-        role = settings.anonymous_role
-        statement = Select(func.set_config("role", role, True))
-    else:
-        role = user.role
-        statement = Select(
-            func.set_config("role", role, True),
-            func.set_config("user.id", str(user.id), True),
-            func.set_config("user.username", user.username, True),
-            func.set_config("user.email", user.email or "", True),
-            func.set_config("user.display_name", user.display_name or user.username, True),
-            func.set_config("user.first_name", user.first_name or "", True),
-            func.set_config("user.surname", user.surname or "", True),
-        )
+        return Select(func.set_config("role", settings.anonymous_role, True))
+    return Select(
+        func.set_config("role", user.role, True),
+        func.set_config("user.id", str(user.id), True),
+        func.set_config("user.username", user.username, True),
+        func.set_config("user.email", user.email or "", True),
+        func.set_config("user.display_name", user.display_name or user.username, True),
+        func.set_config("user.first_name", user.first_name or "", True),
+        func.set_config("user.surname", user.surname or "", True),
+    )
+
+
+async def set_role(session: AsyncSession, user: User | None):
+    """Apply the user's PostgreSQL role to ``session``'s current transaction."""
+    role = settings.anonymous_role if not user else user.role
     _logger.debug("Setting role to %s", role)
-    await session.execute(statement)
+    await session.execute(role_config_statement(user))
     # select set_config('role', 'app_user', true), set_config('user_id', '2', true), ...
 
 
