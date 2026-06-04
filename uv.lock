@@ -403,6 +403,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "sqlalchemy" },
     { name = "strawberry-graphql" },
+    { name = "strawberry-orm", extra = ["sqlalchemy"] },
     { name = "strawberry-sqlalchemy-mapper" },
     { name = "typing-extensions" },
     { name = "uvicorn", extra = ["standard"] },
@@ -443,6 +444,7 @@ requires-dist = [
     { name = "python-multipart" },
     { name = "sqlalchemy" },
     { name = "strawberry-graphql" },
+    { name = "strawberry-orm", extras = ["sqlalchemy"] },
     { name = "strawberry-sqlalchemy-mapper", specifier = ">=0.8.0" },
     { name = "typing-extensions" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.48.0" },
@@ -1660,6 +1662,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/cf/09/f189fd3c70544322eeba0398ccaa980d17857894c0a66d447aa0b5704686/strawberry_graphql-0.316.0.tar.gz", hash = "sha256:bee5ce0e20d522325bd1ed2db186c812c03c2ea7db29f997b35e7d694649820c", size = 223985, upload-time = "2026-05-19T17:06:10.443Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0b/dd/b2cf54803cbd0d37e3ce73c7274bdb144ba83743bc83351b5790eb2a5fad/strawberry_graphql-0.316.0-py3-none-any.whl", hash = "sha256:222e16fbbf953f5a1fa75f62bf9a8e95f274180f928f70bec459b566053aa2cb", size = 326530, upload-time = "2026-05-19T17:06:07.844Z" },
+]
+
+[[package]]
+name = "strawberry-orm"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "strawberry-graphql" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/60/22/4a14276c874f84611f47ad7e439f65932b9e7c142149f861d6f3f8739b50/strawberry_orm-0.13.0.tar.gz", hash = "sha256:e0d00f35f4a6e183e138d027ff9ae183457a97c62452c47da9f826bbd124344d", size = 105150, upload-time = "2026-05-28T21:54:52.598Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/e7/f39c9f060aa444797d559540cc77161dd9b8cc933db3ee06fef26e9d2f23/strawberry_orm-0.13.0-py3-none-any.whl", hash = "sha256:e8ea63a67ef9303826ddbfe177c157246086be93962ded2036ab0bb18d04e2c2", size = 100890, upload-time = "2026-05-28T21:54:51.134Z" },
+]
+
+[package.optional-dependencies]
+sqlalchemy = [
+    { name = "sqlalchemy" },
 ]
 
 [[package]]

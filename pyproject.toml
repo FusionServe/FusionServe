@@ -43,6 +43,7 @@ dependencies = [
     "sqlalchemy",
     "strawberry-graphql",
     "strawberry-sqlalchemy-mapper>=0.8.0",
+    "strawberry-orm[sqlalchemy]",
     "typing-extensions",
     "uvicorn[standard]>=0.48.0",
     "advanced-alchemy==1.9.3",
