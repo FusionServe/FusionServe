@@ -43,6 +43,7 @@ import strawberry
 from pydantic.alias_generators import to_pascal
 from sqlalchemy import delete, event, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from strawberry import relay
 from strawberry.annotation import StrawberryAnnotation
 from strawberry.extensions import QueryDepthLimiter
 from strawberry.litestar import (
@@ -54,6 +55,7 @@ from strawberry.litestar import (
 from strawberry.scalars import JSON as StrawberryJSON
 from strawberry.types.arguments import StrawberryArgument
 from strawberry_orm import StrawberryORM
+from strawberry_orm.relay import ORMListConnection
 
 from . import auth
 from .config import settings
@@ -80,9 +82,18 @@ class CustomContext(BaseContext, kw_only=True):
             user's PostgreSQL role already applied. The strawberry-orm
             SQLAlchemy backend reuses this exact session for every query and
             nested relation load, so row-level security stays consistent.
+
+    The ``_orm_*`` fields are slots the strawberry-orm filter/order extension
+    and relay connection machinery stash query state on. ``BaseContext`` is a
+    slotted ``msgspec.Struct``, so they must be declared here for the writes to
+    succeed (the reads use ``getattr(..., None)``).
     """
 
     session: AsyncSession
+    _orm_base_query: Any = None
+    _orm_backend: Any = None
+    _orm_group_by: Any = None
+    _orm_order: Any = None
 
 
 class CustomHTTPContextType(HTTPContextType, CustomContext):
@@ -261,11 +272,18 @@ def build(introspection: Introspection):
     generated_module = _types_mod.ModuleType(_GENERATED_MODULE)
     sys.modules[_GENERATED_MODULE] = generated_module
     bare_types: dict[type, type] = {}
+    # Tables with a single-column PK are exposed as relay nodes (and their
+    # top-level query as a relay connection); composite-PK tables can't carry a
+    # single ``relay.NodeID`` so they fall back to a plain list field.
+    single_pk: dict[type, bool] = {}
     for orm_class in orm_classes:
         orm.filter(orm_class)
         orm.order(orm_class)
         name = _gql_type_name(orm_class)
-        cls = type(name, (), {})
+        is_single_pk = len(orm_class.__table__.primary_key.columns) == 1
+        single_pk[orm_class] = is_single_pk
+        bases = (relay.Node,) if is_single_pk else ()
+        cls = type(name, bases, {})
         cls.__module__ = _GENERATED_MODULE
         cls.__orm_model__ = orm_class
         cls.__orm_filter__ = orm.backend._filter_registry.get(orm_class)
@@ -280,10 +298,16 @@ def build(introspection: Introspection):
     has_mutations = False
     for orm_class in orm_classes:
         cls = bare_types[orm_class]
-        table_name = orm_class.__table__.name
+        table = orm_class.__table__
+        table_name = table.name
+        pk_column = table.primary_key.columns[0] if single_pk[orm_class] else None
         annotations: dict[str, Any] = {}
-        for column in orm_class.__table__.columns:
-            annotations[column.name] = _column_annotation(column)
+        for column in table.columns:
+            if column is pk_column:
+                # Mark the single PK column as the relay node id.
+                annotations[column.name] = relay.NodeID[column.type.python_type]  # type: ignore[misc]
+            else:
+                annotations[column.name] = _column_annotation(column)
         for rel_name, rel in orm_class.__mapper__.relationships.items():
             target = bare_types.get(rel.mapper.class_)
             if target is None:
@@ -296,16 +320,22 @@ def build(introspection: Introspection):
             filters=cls.__orm_filter__,
             order=cls.__orm_order__,
         )(cls)
-        _apply_descriptions(gql_type, orm_class.__table__)
+        _apply_descriptions(gql_type, table)
         gql_types[orm_class] = gql_type
 
-        # ---- Query: list field (orm.field() builds the list resolver). ----
-        list_field = orm.field(description=f"List {table_name} with filtering and ordering.")
-        Query.__annotations__[table_name] = list[gql_type]
-        setattr(Query, table_name, list_field)
-        # ``orm.field()`` is a descriptor that configures itself in
-        # ``__set_name__`` — trigger it manually since we assign post-hoc.
-        list_field.__set_name__(Query, table_name)
+        # ---- Query: list/connection field. ----
+        if single_pk[orm_class]:
+            # Relay connection (edges/pageInfo/totalCount + filter/order args).
+            conn_field = orm.connection()
+            Query.__annotations__[table_name] = ORMListConnection[gql_type]
+            setattr(Query, table_name, conn_field)
+            conn_field.__set_name__(Query, table_name)
+        else:
+            # Composite-PK fallback: plain list field.
+            list_field = orm.field(description=f"List {table_name} with filtering and ordering.")
+            Query.__annotations__[table_name] = list[gql_type]
+            setattr(Query, table_name, list_field)
+            list_field.__set_name__(Query, table_name)
 
         # ---- Query: primary-key lookup field. ----
         _attach_pk_field(Query, orm_class, gql_type)

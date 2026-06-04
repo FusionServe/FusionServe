@@ -42,6 +42,18 @@ from testcontainers.postgres import PostgresContainer  # noqa: E402
 _TOKEN_ROLES = {"alice-token": "app_author"}
 
 
+def _nodes(connection: dict) -> list[dict]:
+    """Extract the node dicts from a relay connection payload."""
+    return [edge["node"] for edge in connection["edges"]]
+
+
+def _raw_pk(global_id: str) -> int:
+    """Decode a relay GlobalID (base64 of ``Type:value``) to its integer PK."""
+    import base64
+
+    return int(base64.b64decode(global_id).decode().split(":", 1)[1])
+
+
 @pytest.fixture(scope="module")
 def monkeypatch_module():
     """Module-scoped variant of pytest's ``monkeypatch``."""
@@ -249,17 +261,37 @@ def test_introspect_finds_tables_and_view(configured_app):
     assert "book_summaries" in introspection.views
 
 
-def test_graphql_list_anonymous_authors(graphql_client):
-    """strawberry-orm list field serves authors anonymously (native list shape)."""
-    body = graphql_client("{ authors { id name } }")
+def test_graphql_connection_anonymous_authors(graphql_client):
+    """WS4: top-level authors is a relay connection (edges/node)."""
+    body = graphql_client("{ authors { edges { node { name } } } }")
     assert "errors" not in body, body
-    names = {row["name"] for row in body["data"]["authors"]}
+    names = {n["name"] for n in _nodes(body["data"]["authors"])}
     assert {"Alice", "Bob"} <= names
 
 
+def test_graphql_connection_total_count_and_pagination(graphql_client):
+    """WS4: connections expose totalCount and cursor pagination (first/after)."""
+    body = graphql_client(
+        "{ authors(first: 1, order: [{ field: { id: ASC } }]) "
+        "  { totalCount edges { node { name } } pageInfo { hasNextPage endCursor } } }"
+    )
+    assert "errors" not in body, body
+    conn = body["data"]["authors"]
+    assert conn["totalCount"] == 2
+    assert [n["name"] for n in _nodes(conn)] == ["Alice"]
+    assert conn["pageInfo"]["hasNextPage"] is True
+    cursor = conn["pageInfo"]["endCursor"]
+    body2 = graphql_client(
+        f'{{ authors(first: 1, after: "{cursor}", order: [{{ field: {{ id: ASC }} }}]) '
+        "  { edges { node { name } } } }"
+    )
+    assert "errors" not in body2, body2
+    assert [n["name"] for n in _nodes(body2["data"]["authors"])] == ["Bob"]
+
+
 def test_graphql_pk_lookup(graphql_client):
-    """Primary-key lookup returns a single record."""
-    body = graphql_client("{ author(id: 1) { id name } }")
+    """Primary-key lookup returns a single record (raw int PK arg)."""
+    body = graphql_client("{ author(id: 1) { name } }")
     assert "errors" not in body, body
     assert body["data"]["author"]["name"] == "Alice"
 
@@ -271,11 +303,11 @@ def test_graphql_nested_relationship(graphql_client):
     relationship names are singularized/pluralized at the automap layer).
     """
     body = graphql_client(
-        "{ authors(order: [{ field: { id: ASC } }]) { name books { title } } }",
+        "{ authors(order: [{ field: { id: ASC } }]) { edges { node { name books { title } } } } }",
         token="alice-token",
     )
     assert "errors" not in body, body
-    authors = {a["name"]: {b["title"] for b in a["books"]} for a in body["data"]["authors"]}
+    authors = {n["name"]: {b["title"] for b in n["books"]} for n in _nodes(body["data"]["authors"])}
     # app_author sees all of Alice's books (public + private).
     assert {"Public Alice", "Secret Alice"} <= authors["Alice"]
 
@@ -309,11 +341,11 @@ def test_filter_object_traversal_cyclic_limitation(graphql_client):
         "{ books("
         '    filter: { object: { author: { field: { name: { exact: "Alice" } } } } }'
         "    order: [{ field: { id: ASC } }]"
-        "  ) { title } }",
+        "  ) { edges { node { title } } } }",
         token="alice-token",
     )
     assert "errors" not in body, body
-    assert {r["title"] for r in body["data"]["books"]} == {"Public Alice", "Secret Alice"}
+    assert {n["title"] for n in _nodes(body["data"]["books"])} == {"Public Alice", "Secret Alice"}
 
 
 def test_graphql_column_description(graphql_client):
@@ -327,48 +359,48 @@ def test_graphql_column_description(graphql_client):
 def test_graphql_jsonb_column(graphql_client):
     """A JSONB column is exposed via the JSON scalar (not a bare dict)."""
     body = graphql_client(
-        '{ books(filter: { field: { title: { exact: "Public Alice" } } }) { title attributes } }',
+        '{ books(filter: { field: { title: { exact: "Public Alice" } } })   { edges { node { title attributes } } } }',
         token="alice-token",
     )
     assert "errors" not in body, body
-    assert body["data"]["books"][0]["attributes"] == {"genre": "fiction"}
+    assert _nodes(body["data"]["books"])[0]["attributes"] == {"genre": "fiction"}
 
 
 def test_graphql_to_one_relationship(graphql_client):
     """Traverse the to-one direction book -> author (WS2: singular ``author``)."""
     body = graphql_client(
-        "{ books(order: [{ field: { id: ASC } }]) { title author { name } } }",
+        "{ books(order: [{ field: { id: ASC } }]) { edges { node { title author { name } } } } }",
         token="alice-token",
     )
     assert "errors" not in body, body
-    first = body["data"]["books"][0]
+    first = _nodes(body["data"]["books"])[0]
     assert first["author"]["name"] == "Alice"
 
 
 def test_graphql_native_filter(graphql_client):
     """Native @oneOf filter narrows the result set."""
     body = graphql_client(
-        '{ authors(filter: { field: { name: { exact: "Bob" } } }) { name } }',
+        '{ authors(filter: { field: { name: { exact: "Bob" } } }) { edges { node { name } } } }',
     )
     assert "errors" not in body, body
-    names = [row["name"] for row in body["data"]["authors"]]
+    names = [n["name"] for n in _nodes(body["data"]["authors"])]
     assert names == ["Bob"]
 
 
 def test_rls_anonymous_sees_only_public_books(graphql_client):
     """RLS: an anonymous request (app_anon role) sees only public books."""
-    body = graphql_client("{ books { title visibility } }")
+    body = graphql_client("{ books { edges { node { title visibility } } } }")
     assert "errors" not in body, body
-    titles = {row["title"] for row in body["data"]["books"]}
+    titles = {n["title"] for n in _nodes(body["data"]["books"])}
     assert titles == {"Public Alice", "Public Bob"}
     assert "Secret Alice" not in titles
 
 
 def test_rls_authenticated_sees_all_books(graphql_client):
     """RLS: an authenticated request (app_author role) sees private books too."""
-    body = graphql_client("{ books { title } }", token="alice-token")
+    body = graphql_client("{ books { edges { node { title } } } }", token="alice-token")
     assert "errors" not in body, body
-    titles = {row["title"] for row in body["data"]["books"]}
+    titles = {n["title"] for n in _nodes(body["data"]["books"])}
     assert "Secret Alice" in titles
 
 
@@ -378,9 +410,9 @@ def test_rls_nested_anonymous_does_not_leak(graphql_client):
     The strawberry-orm docs warn that parent scoping does not flow to children;
     here the role-scoped session must make the nested books load honour RLS too.
     """
-    body = graphql_client("{ authors { name books { title } } }")
+    body = graphql_client("{ authors { edges { node { name books { title } } } } }")
     assert "errors" not in body, body
-    by_author = {a["name"]: {b["title"] for b in a["books"]} for a in body["data"]["authors"]}
+    by_author = {n["name"]: {b["title"] for b in n["books"]} for n in _nodes(body["data"]["authors"])}
     # Anonymous: Alice's nested books exclude the private one.
     assert "Secret Alice" not in by_author.get("Alice", set())
     assert "Public Alice" in by_author.get("Alice", set())
@@ -392,9 +424,10 @@ def test_mutation_create_and_delete(graphql_client):
     assert "errors" not in body, body
     created = body["data"]["createAuthor"]
     assert created["name"] == "Carol"
-    new_id = created["id"]
+    # Returned ``id`` is a relay GlobalID; decode to the raw PK for delete-by-pk.
+    raw = _raw_pk(created["id"])
 
-    body = graphql_client(f"mutation {{ deleteAuthor(id: {new_id}) {{ name }} }}", token="alice-token")
+    body = graphql_client(f"mutation {{ deleteAuthor(id: {raw}) {{ name }} }}", token="alice-token")
     assert "errors" not in body, body
     assert body["data"]["deleteAuthor"]["name"] == "Carol"
 
@@ -402,7 +435,7 @@ def test_mutation_create_and_delete(graphql_client):
 def test_mutation_create_many_and_delete_many(graphql_client):
     """create<Plural> inserts many; delete<Plural> removes them via a where filter."""
     body = graphql_client(
-        'mutation { createAuthors(inputs: [{ name: "D1" }, { name: "D2" }]) { id name } }',
+        'mutation { createAuthors(inputs: [{ name: "D1" }, { name: "D2" }]) { name } }',
         token="alice-token",
     )
     assert "errors" not in body, body
@@ -420,16 +453,16 @@ def test_mutation_create_many_and_delete_many(graphql_client):
 def test_mutation_update_by_pk(graphql_client):
     """update<Singular> patches a single record by primary key."""
     created = graphql_client('mutation { createAuthor(input: { name: "ToRename" }) { id } }', token="alice-token")
-    aid = created["data"]["createAuthor"]["id"]
+    raw = _raw_pk(created["data"]["createAuthor"]["id"])
     try:
         body = graphql_client(
-            f'mutation {{ updateAuthor(id: {aid}, patch: {{ name: "Renamed" }}) {{ name }} }}',
+            f'mutation {{ updateAuthor(id: {raw}, patch: {{ name: "Renamed" }}) {{ name }} }}',
             token="alice-token",
         )
         assert "errors" not in body, body
         assert body["data"]["updateAuthor"]["name"] == "Renamed"
     finally:
-        graphql_client(f"mutation {{ deleteAuthor(id: {aid}) {{ id }} }}", token="alice-token")
+        graphql_client(f"mutation {{ deleteAuthor(id: {raw}) {{ name }} }}", token="alice-token")
 
 
 def test_mutation_update_many_empty_where_guardrail(graphql_client):
@@ -505,11 +538,11 @@ def test_graphql_nested_relationship_is_bounded(configured_app, graphql_client):
     sync_engine = persistence.engine.sync_engine
     event.listen(sync_engine, "after_cursor_execute", _count)
     try:
-        body = graphql_client("{ authors { name books { title } } }", token="alice-token")
+        body = graphql_client("{ authors { edges { node { name books { title } } } } }", token="alice-token")
     finally:
         event.remove(sync_engine, "after_cursor_execute", _count)
     assert "errors" not in body, body
     # 2 seeded authors; a per-row (N+1) load would scale with author count.
     # Expect ~2 SELECTs (authors, then a single batched books load) plus minor
-    # overhead — bounded well under a per-author count.
-    assert len(selects) <= 4, f"unexpected SELECT count {len(selects)}: {selects}"
+    # connection overhead — bounded well under a per-author count.
+    assert len(selects) <= 5, f"unexpected SELECT count {len(selects)}: {selects}"
