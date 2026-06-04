@@ -57,7 +57,7 @@ from strawberry_orm import StrawberryORM
 
 from . import auth
 from .config import settings
-from .models import Introspection, RecordNotFoundError
+from .models import Introspection, RecordNotFoundError, SmartComment
 from .persistence import async_session, inflect, role_config_statement, set_role
 
 _logger = logging.getLogger(settings.app_name)
@@ -188,6 +188,26 @@ def _set_resolver_arguments(field, arguments: list[StrawberryArgument]) -> None:
     field.base_resolver.arguments = arguments
 
 
+def _apply_descriptions(gql_type: type, table: Any) -> None:
+    """Copy smart-comment text onto the type and its column field descriptions.
+
+    ``orm.type()`` exposes no description hook, so descriptions are applied
+    after decoration by mutating the produced Strawberry definition. The table
+    comment becomes the type description; each column comment becomes the
+    matching field's description. Relationship/non-column fields are untouched.
+    """
+    table_comment = SmartComment.from_object(table).content
+    if table_comment:
+        gql_type.__strawberry_definition__.description = table_comment
+    for column in table.columns:
+        field = gql_type.__strawberry_definition__.get_field(column.name)
+        if field is None:
+            continue
+        content = SmartComment.from_object(column).content
+        if content:
+            field.description = content
+
+
 def build(introspection: Introspection):
     """Build a strawberry-orm GraphQL controller from an :class:`Introspection`.
 
@@ -276,6 +296,7 @@ def build(introspection: Introspection):
             filters=cls.__orm_filter__,
             order=cls.__orm_order__,
         )(cls)
+        _apply_descriptions(gql_type, orm_class.__table__)
         gql_types[orm_class] = gql_type
 
         # ---- Query: list field (orm.field() builds the list resolver). ----

@@ -110,6 +110,7 @@ def postgres_container():
                         """
                     )
                 )
+                conn.execute(text(f"COMMENT ON COLUMN \"{schema}\".books.title IS 'The book title.'"))
                 # Smart comment declaring the view's logical PK so introspection
                 # maps it as a read-only type (undeclared views stay unmapped).
                 conn.execute(
@@ -313,6 +314,14 @@ def test_filter_object_traversal_cyclic_limitation(graphql_client):
     )
     assert "errors" not in body, body
     assert {r["title"] for r in body["data"]["books"]} == {"Public Alice", "Secret Alice"}
+
+
+def test_graphql_column_description(graphql_client):
+    """WS3: a column's smart comment becomes the GraphQL field description."""
+    body = graphql_client('{ __type(name: "Book") { fields { name description } } }')
+    assert "errors" not in body, body
+    descriptions = {f["name"]: f["description"] for f in body["data"]["__type"]["fields"]}
+    assert descriptions["title"] == "The book title."
 
 
 def test_graphql_jsonb_column(graphql_client):
