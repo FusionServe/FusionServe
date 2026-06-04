@@ -51,6 +51,7 @@ from strawberry.litestar import (
     WebSocketContextType,
     make_graphql_controller,
 )
+from strawberry.scalars import JSON as StrawberryJSON
 from strawberry.types.arguments import StrawberryArgument
 from strawberry_orm import StrawberryORM
 
@@ -146,8 +147,12 @@ def _column_annotation(column: Any) -> Any:
 
     Uses the column's ``python_type`` (so UUID / Decimal / datetime survive
     instead of being downgraded to ``str`` by the backend's type map), wrapping
-    it in ``| None`` when the column is nullable. Columns whose type has no
-    Python equivalent (e.g. JSON) fall back to :data:`strawberry_orm.auto`.
+    it in ``| None`` when the column is nullable.
+
+    JSON / JSONB columns report ``python_type`` as ``dict`` (or ``list``), which
+    is not a valid GraphQL output type, so they are mapped to Strawberry's
+    ``JSON`` scalar. Columns whose type has no Python equivalent fall back to
+    :data:`strawberry_orm.auto` (the backend maps it to ``str``).
     """
     try:
         python_type = column.type.python_type
@@ -155,6 +160,8 @@ def _column_annotation(column: Any) -> Any:
         from strawberry_orm import auto
 
         return auto
+    if python_type in (dict, list):
+        python_type = StrawberryJSON
     return python_type | None if column.nullable else python_type
 
 

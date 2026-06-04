@@ -90,7 +90,8 @@ def postgres_container():
                             id serial PRIMARY KEY,
                             author_id integer NOT NULL REFERENCES "{schema}".authors(id),
                             title text NOT NULL,
-                            visibility text NOT NULL DEFAULT 'private'
+                            visibility text NOT NULL DEFAULT 'private',
+                            attributes jsonb
                         );
                         """
                     )
@@ -144,10 +145,10 @@ Joined view of books and their author names.';
                 conn.execute(
                     text(
                         f"""
-                        INSERT INTO "{schema}".books (author_id, title, visibility) VALUES
-                            (1, 'Public Alice', 'public'),
-                            (1, 'Secret Alice', 'private'),
-                            (2, 'Public Bob', 'public');
+                        INSERT INTO "{schema}".books (author_id, title, visibility, attributes) VALUES
+                            (1, 'Public Alice', 'public', '{{"genre": "fiction"}}'),
+                            (1, 'Secret Alice', 'private', NULL),
+                            (2, 'Public Bob', 'public', NULL);
                         """
                     )
                 )
@@ -268,6 +269,16 @@ def test_graphql_nested_relationship(graphql_client):
     authors = {a["name"]: {b["title"] for b in a["booksCollection"]} for a in body["data"]["authors"]}
     # app_author sees all of Alice's books (public + private).
     assert {"Public Alice", "Secret Alice"} <= authors["Alice"]
+
+
+def test_graphql_jsonb_column(graphql_client):
+    """A JSONB column is exposed via the JSON scalar (not a bare dict)."""
+    body = graphql_client(
+        '{ books(filter: { field: { title: { exact: "Public Alice" } } }) { title attributes } }',
+        token="alice-token",
+    )
+    assert "errors" not in body, body
+    assert body["data"]["books"][0]["attributes"] == {"genre": "fiction"}
 
 
 def test_graphql_to_one_relationship(graphql_client):

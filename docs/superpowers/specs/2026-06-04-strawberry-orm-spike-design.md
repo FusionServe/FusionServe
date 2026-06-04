@@ -260,7 +260,7 @@ PG, all green). Environment note: run via a Podman socket forwarded over SSH
 
 | # | Finding | Severity | Workaround |
 |---|---------|----------|-----------|
-| 1 | Backend type map downgrades `UUID`→`str` and `JSON`→`str`. | Med | Annotate columns with concrete `python_type` instead of `auto` (done). |
+| 1 | Backend type map downgrades `UUID`→`str` and `JSON`→`str`. Also, annotating with concrete `python_type` exposes JSON/JSONB as `dict`, which strawberry rejects (`Unexpected type '<class 'dict'>'`) and crashes schema build for any table with a JSON column (e.g. `users`). | Med | Annotate columns with concrete `python_type` instead of `auto`, and map `dict`/`list` python types to the Strawberry `JSON` scalar (done; covered by a JSONB regression test). |
 | 2 | `type()` does **not** auto-include columns; every field must be declared. | Low | Synthesize annotations from `__table__.columns` + `__mapper__.relationships` (done). |
 | 3 | No per-field rename on the dynamic `type()` path → relationships use automap default names (`booksCollection`, scalar `authors`) instead of the old singularized `books` / `author`. **Public API change.** | Med | Hand-build those fields (not done in spike); or accept new names. |
 | 4 | No description hook on dynamic `type()` → column/table SmartComment descriptions are lost on output types. | Med | Post-process `__strawberry_definition__.fields`, or hand-build fields. Not done. |
