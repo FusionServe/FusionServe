@@ -123,6 +123,19 @@ def postgres_container():
                     )
                 )
                 conn.execute(text(f"COMMENT ON COLUMN \"{schema}\".books.title IS 'The book title.'"))
+                # STABLE functions for the custom-query (PG-function) surface.
+                conn.execute(
+                    text(
+                        f'CREATE FUNCTION "{schema}".public_books() RETURNS SETOF "{schema}".books '
+                        f"LANGUAGE sql STABLE AS $$ SELECT * FROM \"{schema}\".books WHERE visibility = 'public' $$"
+                    )
+                )
+                conn.execute(
+                    text(
+                        f'CREATE FUNCTION "{schema}".book_count() RETURNS integer '
+                        f'LANGUAGE sql STABLE AS $$ SELECT count(*)::int FROM "{schema}".books $$'
+                    )
+                )
                 # Smart comment declaring the view's logical PK so introspection
                 # maps it as a read-only type (undeclared views stay unmapped).
                 conn.execute(
@@ -346,6 +359,24 @@ def test_filter_object_traversal_cyclic_limitation(graphql_client):
     )
     assert "errors" not in body, body
     assert {n["title"] for n in _nodes(body["data"]["books"])} == {"Public Alice", "Secret Alice"}
+
+
+def test_function_set_returning(graphql_client):
+    """WS5: a STABLE function returning SETOF a table maps to a list of nodes."""
+    body = graphql_client("{ publicBooks { title } }", token="alice-token")
+    assert "errors" not in body, body
+    titles = {r["title"] for r in body["data"]["publicBooks"]}
+    assert titles == {"Public Alice", "Public Bob"}
+
+
+def test_function_scalar_under_rls(graphql_client):
+    """WS5: a SCALAR function runs under the request role (RLS applies)."""
+    anon = graphql_client("{ bookCount }")
+    assert "errors" not in anon, anon
+    assert anon["data"]["bookCount"] == 2  # anon sees only public books
+    authed = graphql_client("{ bookCount }", token="alice-token")
+    assert "errors" not in authed, authed
+    assert authed["data"]["bookCount"] == 3  # app_author sees private too
 
 
 def test_graphql_column_description(graphql_client):

@@ -219,8 +219,11 @@ The spike ends with a written recommendation appended to this spec covering:
 
 ## Out of scope
 
-- PG-function custom queries (ROW / SET / SCALAR) — deferred to a follow-up if
-  the spike is a "go".
+- ~~PG-function custom queries (ROW / SET / SCALAR)~~ — **implemented in WS5**
+  (post-spike): one Query field per STABLE/IMMUTABLE function, run on the
+  role-scoped session (RLS applies), with the collision/unmappable skip
+  behaviour preserved. Covered by `test_function_set_returning` and
+  `test_function_scalar_under_rls`.
 - Removing `strawberry-sqlalchemy-mapper` from dependencies.
 - Building a compatibility layer to preserve the current Hasura-style GraphQL
   API shape (the native shape is adopted instead).

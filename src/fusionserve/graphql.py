@@ -41,7 +41,7 @@ import litestar
 import litestar.datastructures
 import strawberry
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import delete, event, insert, select, update
+from sqlalchemy import delete, event, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from strawberry import relay
 from strawberry.annotation import StrawberryAnnotation
@@ -54,12 +54,13 @@ from strawberry.litestar import (
 )
 from strawberry.scalars import JSON as StrawberryJSON
 from strawberry.types.arguments import StrawberryArgument
+from strawberry.utils.str_converters import to_camel_case
 from strawberry_orm import StrawberryORM
 from strawberry_orm.relay import ORMListConnection
 
 from . import auth
 from .config import settings
-from .models import Introspection, RecordNotFoundError, SmartComment
+from .models import FunctionInfo, FunctionReturnKind, Introspection, RecordNotFoundError, SmartComment
 from .persistence import async_session, inflect, role_config_statement, set_role
 
 _logger = logging.getLogger(settings.app_name)
@@ -219,6 +220,101 @@ def _apply_descriptions(gql_type: type, table: Any) -> None:
             field.description = content
 
 
+class _UnmappableFunctionError(RuntimeError):
+    """Signal that a :class:`FunctionInfo` can't be wired into the schema.
+
+    Caught in :func:`build` so the offending function is logged and skipped
+    rather than aborting startup.
+    """
+
+
+def _function_return_annotation(fn: FunctionInfo, gql_types_by_table: dict[str, type]):
+    """Resolve the GraphQL return annotation for a custom-query function.
+
+    Returns ``T | None`` for ``SCALAR``, ``GqlType | None`` for ``ROW``, and
+    ``list[GqlType]`` for ``SET``.
+
+    Raises:
+        _UnmappableFunctionError: If a ROW/SET return table has no mapped type.
+    """
+    if fn.return_kind == FunctionReturnKind.SCALAR:
+        return fn.return_python_type | None
+    gql_type = gql_types_by_table.get(fn.return_table_name)
+    if gql_type is None:
+        raise _UnmappableFunctionError(f"return table {fn.return_table_name!r} has no GraphQL type mapped")
+    if fn.return_kind == FunctionReturnKind.SET:
+        return list[gql_type]
+    return gql_type | None
+
+
+def _build_function_resolver(fn: FunctionInfo, base):
+    """Build the async resolver for a custom-query PostgreSQL function.
+
+    Runs on the request's role-scoped context session (so RLS applies) using
+    PostgreSQL named-argument call syntax (``arg := :arg``) so UNSET arguments
+    fall back to the function's declared defaults. ROW/SET returns are read as
+    automap ORM instances via ``select(orm_class).from_statement(...)``.
+    """
+    qualified = f'"{fn.schema}"."{fn.name}"'
+
+    async def resolver(info: strawberry.Info[CustomHTTPContextType, None], **kwargs: object):
+        bind = {k: v for k, v in kwargs.items() if v is not strawberry.UNSET}
+        placeholders = ", ".join(f"{name} := :{name}" for name in bind)
+        session = info.context.session
+        if fn.return_kind == FunctionReturnKind.SCALAR:
+            sql = f"SELECT {qualified}({placeholders}) AS value"
+            return (await session.execute(text(sql).bindparams(**bind))).scalar()
+        sql = f"SELECT * FROM {qualified}({placeholders})"
+        orm_class = base.classes[fn.return_table_name]
+        statement = select(orm_class).from_statement(text(sql).bindparams(**bind))
+        rows = (await session.execute(statement)).scalars().all()
+        if fn.return_kind == FunctionReturnKind.SET:
+            return list(rows)
+        return rows[0] if rows else None
+
+    return resolver
+
+
+def _attach_function_fields(query_cls: type, introspection: Introspection, gql_types: dict[type, type]) -> None:
+    """Attach one Query field per STABLE/IMMUTABLE PostgreSQL function.
+
+    Functions whose name collides with an existing query field, or whose
+    ROW/SET return table has no mapped GraphQL type, are logged and skipped.
+    """
+    gql_types_by_table = {orm_class.__table__.name: gql for orm_class, gql in gql_types.items()}
+    existing = {name for name in dir(query_cls) if not name.startswith("__")}
+    for fn in introspection.functions:
+        field_name = to_camel_case(fn.name)
+        if field_name in existing:
+            _logger.warning(
+                "Skipping GraphQL exposure of function %s.%s: field name %r collides with an existing field.",
+                fn.schema,
+                fn.name,
+                field_name,
+            )
+            continue
+        try:
+            return_annotation = _function_return_annotation(fn, gql_types_by_table)
+        except _UnmappableFunctionError as exc:
+            _logger.warning("Skipping GraphQL exposure of function %s.%s: %s", fn.schema, fn.name, exc)
+            continue
+        field = strawberry.field(
+            resolver=_build_function_resolver(fn, introspection.base),
+            description=fn.description or f"Custom query exposing {fn.schema}.{fn.name}().",
+        )
+        field.type_annotation = StrawberryAnnotation(return_annotation)
+        setattr(query_cls, field_name, field)
+        arguments: list[StrawberryArgument] = []
+        for p in fn.params:
+            annotation = StrawberryAnnotation(p.python_type | None if p.has_default else p.python_type)
+            if p.has_default:
+                arguments.append(StrawberryArgument(p.name, p.name, annotation, default=strawberry.UNSET))
+            else:
+                arguments.append(StrawberryArgument(p.name, p.name, annotation))
+        _set_resolver_arguments(field, arguments)
+        existing.add(field_name)
+
+
 def build(introspection: Introspection):
     """Build a strawberry-orm GraphQL controller from an :class:`Introspection`.
 
@@ -344,6 +440,9 @@ def build(introspection: Introspection):
         if table_name not in introspection.views:
             _attach_mutations(Mutation, orm, orm_class, gql_type)
             has_mutations = True
+
+    # ---- Custom queries from STABLE/IMMUTABLE PostgreSQL functions. ----
+    _attach_function_fields(Query, introspection, gql_types)
 
     schema = orm.schema(
         query=strawberry.type(Query),
