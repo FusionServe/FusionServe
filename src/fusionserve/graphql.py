@@ -1003,6 +1003,7 @@ def build(introspection: Introspection):
 
     for orm_class in _base.classes:
         table: Table = orm_class.__table__
+        is_view = table.name in introspection.views
         comment = SmartComment.from_object(table)
         pks = table.primary_key.columns.keys()
         gql_type = mapper.type(orm_class)(type(to_pascal(inflect.singular_noun(table.name)), (object,), {}))
@@ -1059,6 +1060,9 @@ def build(introspection: Introspection):
                 for pk in pks
             ],
         )
+        # Views are exposed read-only: no create/update/delete surface.
+        if is_view:
+            continue
         # ---- Mutation: create one ----
         create_one = f"create{to_pascal(pk_field_name)}"
         setattr(

@@ -130,7 +130,7 @@ def create_create_input_model(table: Table) -> type[BaseModel]:
     )
 
 
-def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
+def create_controller(orm_class: DeclarativeMeta, is_view: bool = False) -> litestar.Controller:
     """Dynamically create a Litestar Controller class for a given ORM class.
 
     Generates a ``Controller`` sub-class with five HTTP handlers: ``GET /``
@@ -139,9 +139,15 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
     models are built on the fly from the ORM class's table — no external
     registry is required.
 
+    When ``is_view`` is ``True`` the three write handlers (create, update,
+    delete) are dropped, leaving a read-only controller, because views are
+    generally not writable.
+
     Args:
         orm_class: The SQLAlchemy automap-generated ORM class representing
             the underlying table.
+        is_view: Whether ``orm_class`` is backed by a view; if so, only the
+            read handlers are kept.
 
     Returns:
         A dynamically constructed :class:`litestar.Controller` subclass wired
@@ -384,25 +390,38 @@ def create_controller(orm_class: DeclarativeMeta) -> litestar.Controller:
             await session.delete(record)
             await session.commit()
 
+    if is_view:
+        # Views are read-only: strip the write handlers before the controller
+        # is registered so only list + retrieve routes are mounted.
+        del ItemController.create_item
+        del ItemController.update_item
+        del ItemController.delete_item
+
     return ItemController
 
 
-def build(_base: AutomapBase) -> list[litestar.Controller]:
+def build(introspection: Introspection) -> list[litestar.Controller]:
     """Build and return a list of Litestar controllers for every reflected table.
 
-    Iterates over ``_base.classes`` and calls :func:`create_controller` for
-    each ORM class.  No external registry is required: response and query
-    Pydantic models are derived from each table at controller-creation time.
+    Iterates over ``introspection.base.classes`` and calls
+    :func:`create_controller` for each ORM class.  No external registry is
+    required: response and query Pydantic models are derived from each table at
+    controller-creation time. Classes whose table name is in
+    ``introspection.views`` get a read-only controller.
 
     Args:
-        _base: The SQLAlchemy automap base whose ``.classes`` attribute maps
-            table names to ORM classes.
+        introspection: The :class:`Introspection` returned by
+            :func:`fusionserve.persistence.introspect`, providing the automap
+            base and the set of mapped read-only view names.
 
     Returns:
         A list of dynamically generated :class:`litestar.Controller` subclasses,
-        one per table in ``_base.classes``.
+        one per table in ``introspection.base.classes``.
     """
-    return [create_controller(orm_class) for orm_class in _base.classes]
+    return [
+        create_controller(orm_class, orm_class.__table__.name in introspection.views)
+        for orm_class in introspection.base.classes
+    ]
 
 
 def _python_type_for_rest(t: type) -> Any:

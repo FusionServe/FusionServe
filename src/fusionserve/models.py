@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import strawberry
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import Column, Table
 from sqlalchemy.ext.automap import AutomapBase
 
@@ -183,15 +183,60 @@ class PaginationParams(BaseModel):
     order_by: str | None = Field(None, alias="__order_by")
 
 
+class SmartCommentMetadata(BaseModel):
+    """Validated YAML-frontmatter payload of a smart comment.
+
+    Known keys are typed and validated; any other keys are ignored
+    (``extra="ignore"``) and dropped during parsing.
+
+    Attributes:
+        primary_key: Logical primary-key column name(s) used to map a view
+            (which carries no primary key in the PostgreSQL catalogue). A bare
+            string is coerced to a single-element list. ``None`` when the
+            comment does not declare one.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    primary_key: list[str] | None = None
+
+    @field_validator("primary_key", mode="before")
+    @classmethod
+    def _coerce_primary_key(cls, value: Any) -> Any:
+        """Coerce a bare string to a one-element list and reject blank entries.
+
+        Args:
+            value: The raw ``primary_key`` value from the parsed frontmatter.
+
+        Returns:
+            ``None`` unchanged, a single string wrapped in a list, or the
+            original list with each entry stripped.
+
+        Raises:
+            ValueError: If any entry is not a non-empty string.
+        """
+        if value is None:
+            return None
+        items = [value] if isinstance(value, str) else value
+        if not isinstance(items, list) or not items:
+            raise ValueError("primary_key must be a non-empty string or list of strings")
+        cleaned: list[str] = []
+        for item in items:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("primary_key entries must be non-empty strings")
+            cleaned.append(item.strip())
+        return cleaned
+
+
 class SmartComment(BaseModel):
     """Parsed table / column / function comment, optionally with YAML frontmatter.
 
     Attributes:
-        metadata: YAML-frontmatter dict, when present.
+        metadata: Validated YAML-frontmatter payload, when present.
         content: Plain-text body following the (optional) frontmatter block.
     """
 
-    metadata: dict[str, Any] | None = None
+    metadata: SmartCommentMetadata | None = None
     content: str | None = None
 
     @classmethod
@@ -199,10 +244,15 @@ class SmartComment(BaseModel):
         """Parse a raw comment string, extracting optional YAML frontmatter.
 
         If the input starts with a YAML frontmatter block delimited by ``---``
-        markers, the metadata is parsed and returned alongside the plain-text
-        content. Any YAML parse error falls back to returning the whole input
-        as plain-text content — no exception is raised (per the parsing
-        contract).
+        markers, the metadata is parsed, validated against
+        :class:`SmartCommentMetadata`, and returned alongside the plain-text
+        content. Any YAML *parse* error falls back to returning the whole input
+        as plain-text content — no exception is raised in that case (per the
+        parsing contract).
+
+        Well-formed YAML that fails :class:`SmartCommentMetadata` validation
+        (e.g. a malformed ``primary_key``) is treated as an authoring error and
+        the resulting :class:`pydantic.ValidationError` is allowed to propagate.
 
         Args:
             comment: The raw comment string. ``None`` or empty input yields an
@@ -211,6 +261,10 @@ class SmartComment(BaseModel):
         Returns:
             A :class:`SmartComment` with optional ``metadata`` and ``content``
             fields populated.
+
+        Raises:
+            pydantic.ValidationError: If the parsed frontmatter is well-formed
+                YAML but does not satisfy :class:`SmartCommentMetadata`.
         """
         if not comment:
             return cls()
@@ -225,7 +279,7 @@ class SmartComment(BaseModel):
         except yaml.YAMLError:
             return cls(content=comment)
 
-        return cls(metadata=metadata, content=content.lstrip("\n"))
+        return cls(metadata=SmartCommentMetadata.model_validate(metadata), content=content.lstrip("\n"))
 
     @classmethod
     def from_object(cls, obj: Table | Column) -> SmartComment:
@@ -355,8 +409,9 @@ class FunctionInfo:
         return_table_name: Table name when the return is a row or set of an
             existing reflected table; ``None`` otherwise.
         description: Plain-text portion of the function's smart comment.
-        metadata: YAML-frontmatter portion of the function's smart comment
-            (currently stored for future authorization hooks; unused at v1).
+        metadata: Validated YAML-frontmatter portion of the function's smart
+            comment (currently stored for future authorization hooks; unused
+            at v1).
     """
 
     schema: str
@@ -368,7 +423,7 @@ class FunctionInfo:
     return_python_type: type | None = None
     return_table_name: str | None = None
     description: str | None = None
-    metadata: dict[str, Any] | None = None
+    metadata: SmartCommentMetadata | None = None
 
 
 @dataclass
@@ -385,10 +440,14 @@ class Introspection:
         functions: List of :class:`FunctionInfo` entries — one per supported
             ``STABLE`` / ``IMMUTABLE`` function discovered in
             ``settings.pg_app_schema``.
+        views: Names of mapped classes that are backed by (materialized or
+            plain) views. These are exposed read-only — no create/update/delete
+            surface is generated for them.
     """
 
     base: AutomapBase
     functions: list[FunctionInfo] = dc_field(default_factory=list)
+    views: set[str] = dc_field(default_factory=set)
 
     # immutable, stable, volatile
 
