@@ -238,10 +238,68 @@ def test_introspect_finds_tables_and_view(configured_app):
     assert "book_summaries" in introspection.views
 
 
-def test_graphql_baseline_anonymous_authors(graphql_client):
-    """Baseline: the current implementation serves a list query anonymously."""
-    body = graphql_client("{ authors { nodes { id name } totalCount } }")
+def test_graphql_list_anonymous_authors(graphql_client):
+    """strawberry-orm list field serves authors anonymously (native list shape)."""
+    body = graphql_client("{ authors { id name } }")
     assert "errors" not in body, body
-    nodes = body["data"]["authors"]["nodes"]
-    names = {row["name"] for row in nodes}
+    names = {row["name"] for row in body["data"]["authors"]}
     assert {"Alice", "Bob"} <= names
+
+
+def test_graphql_pk_lookup(graphql_client):
+    """Primary-key lookup returns a single record."""
+    body = graphql_client("{ author(id: 1) { id name } }")
+    assert "errors" not in body, body
+    assert body["data"]["author"]["name"] == "Alice"
+
+
+def test_graphql_nested_relationship(graphql_client):
+    """Authenticated nested query traverses author -> books via the optimizer.
+
+    Note: the to-many relation field is named ``booksCollection`` (SQLAlchemy
+    automap default) rather than the old implementation's singularized
+    ``books`` — a documented naming-friction finding.
+    """
+    body = graphql_client(
+        "{ authors(order: [{ field: { id: ASC } }]) { name booksCollection { title } } }",
+        token="alice-token",
+    )
+    assert "errors" not in body, body
+    authors = {a["name"]: {b["title"] for b in a["booksCollection"]} for a in body["data"]["authors"]}
+    # app_author sees all of Alice's books (public + private).
+    assert {"Public Alice", "Secret Alice"} <= authors["Alice"]
+
+
+def test_graphql_native_filter(graphql_client):
+    """Native @oneOf filter narrows the result set."""
+    body = graphql_client(
+        '{ authors(filter: { field: { name: { exact: "Bob" } } }) { name } }',
+    )
+    assert "errors" not in body, body
+    names = [row["name"] for row in body["data"]["authors"]]
+    assert names == ["Bob"]
+
+
+def test_graphql_nested_relationship_is_bounded(configured_app, graphql_client):
+    """Nested author->books query issues a bounded number of SELECTs (no N+1)."""
+    from sqlalchemy import event
+
+    from fusionserve import persistence
+
+    selects: list[str] = []
+
+    def _count(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT") and "FROM" in statement.upper():
+            selects.append(statement)
+
+    sync_engine = persistence.engine.sync_engine
+    event.listen(sync_engine, "after_cursor_execute", _count)
+    try:
+        body = graphql_client("{ authors { name booksCollection { title } } }", token="alice-token")
+    finally:
+        event.remove(sync_engine, "after_cursor_execute", _count)
+    assert "errors" not in body, body
+    # 2 seeded authors; a per-row (N+1) load would scale with author count.
+    # Expect ~2 SELECTs (authors, then a single batched books load) plus minor
+    # overhead — bounded well under a per-author count.
+    assert len(selects) <= 4, f"unexpected SELECT count {len(selects)}: {selects}"
