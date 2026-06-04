@@ -200,6 +200,26 @@ def _set_resolver_arguments(field, arguments: list[StrawberryArgument]) -> None:
     field.base_resolver.arguments = arguments
 
 
+#: Private strawberry-orm backend attributes the dynamic builder depends on.
+#: Driving the library dynamically has no public accessor for the per-model
+#: filter/order type registries in 0.13.0, so we read them directly — guarded
+#: by :func:`_orm_registry` and pinned by a unit test so a breaking upgrade
+#: fails loudly instead of silently dropping filter/order args.
+_FILTER_REGISTRY_ATTR = "_filter_registry"
+_ORDER_REGISTRY_ATTR = "_order_registry"
+
+
+def _orm_registry(backend: object, attr: str) -> dict:
+    """Return a strawberry-orm backend registry, or raise a clear upgrade error."""
+    registry = getattr(backend, attr, None)
+    if registry is None:
+        raise RuntimeError(
+            f"strawberry-orm backend is missing the private {attr!r} registry this build relies on. "
+            f"A strawberry-orm upgrade likely changed its internals — update fusionserve.graphql.build()."
+        )
+    return registry
+
+
 def _apply_descriptions(gql_type: type, table: Any) -> None:
     """Copy smart-comment text onto the type and its column field descriptions.
 
@@ -365,6 +385,9 @@ def build(introspection: Introspection):
     # ``strawberry.type`` later decorates each bare class in place, so annotations
     # already point at the final types. Each iteration only reads its own registry
     # entry, so iteration order is irrelevant here.
+    filter_registry = _orm_registry(orm.backend, _FILTER_REGISTRY_ATTR)
+    order_registry = _orm_registry(orm.backend, _ORDER_REGISTRY_ATTR)
+
     generated_module = _types_mod.ModuleType(_GENERATED_MODULE)
     sys.modules[_GENERATED_MODULE] = generated_module
     bare_types: dict[type, type] = {}
@@ -382,8 +405,8 @@ def build(introspection: Introspection):
         cls = type(name, bases, {})
         cls.__module__ = _GENERATED_MODULE
         cls.__orm_model__ = orm_class
-        cls.__orm_filter__ = orm.backend._filter_registry.get(orm_class)
-        cls.__orm_order__ = orm.backend._order_registry.get(orm_class)
+        cls.__orm_filter__ = filter_registry.get(orm_class)
+        cls.__orm_order__ = order_registry.get(orm_class)
         setattr(generated_module, name, cls)
         bare_types[orm_class] = cls
 
