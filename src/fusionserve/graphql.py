@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import sys
 import types as _types_mod
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import litestar
@@ -95,30 +96,33 @@ class CustomWSContextType(WebSocketContextType, CustomContext):
     socket: litestar.WebSocket[auth.User, Any, litestar.datastructures.State]
 
 
-async def custom_context_getter(request: litestar.Request) -> CustomContext:
+async def custom_context_getter(request: litestar.Request) -> AsyncGenerator[CustomContext]:
     """Open one role-scoped async session per GraphQL request.
 
     A single :class:`~sqlalchemy.ext.asyncio.AsyncSession` is opened and the
     request user's PostgreSQL role is applied via
     :func:`fusionserve.persistence.set_role` before any resolver runs. The
     session is exposed on the context so the strawberry-orm backend's
-    ``session_getter`` can reuse it for the whole request.
+    ``session_getter`` can reuse it for the whole request, then closed when the
+    request completes.
 
-    Note:
-        Strawberry's ``context_getter`` has no teardown hook, so the session is
-        not explicitly closed here. Proper teardown (a Litestar dependency or
-        ``after_response`` hook owning the session lifecycle) is a documented
-        spike finding to resolve before any production use.
+    Strawberry's Litestar integration wires this via ``litestar.di.Provide``,
+    which honours async-generator dependencies — so yielding the context and
+    closing the session in ``finally`` gives correct per-request lifecycle
+    without leaking pooled connections.
 
     Args:
         request: The incoming Litestar HTTP request.
 
-    Returns:
+    Yields:
         A :class:`CustomContext` wrapping the role-scoped session.
     """
     session = async_session()
     await set_role(session, request.user)
-    return CustomContext(session=session)
+    try:
+        yield CustomContext(session=session)
+    finally:
+        await session.close()
 
 
 def _session_from_context(info: strawberry.Info) -> AsyncSession:

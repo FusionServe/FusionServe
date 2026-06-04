@@ -280,6 +280,37 @@ def test_graphql_native_filter(graphql_client):
     assert names == ["Bob"]
 
 
+def test_rls_anonymous_sees_only_public_books(graphql_client):
+    """RLS: an anonymous request (app_anon role) sees only public books."""
+    body = graphql_client("{ books { title visibility } }")
+    assert "errors" not in body, body
+    titles = {row["title"] for row in body["data"]["books"]}
+    assert titles == {"Public Alice", "Public Bob"}
+    assert "Secret Alice" not in titles
+
+
+def test_rls_authenticated_sees_all_books(graphql_client):
+    """RLS: an authenticated request (app_author role) sees private books too."""
+    body = graphql_client("{ books { title } }", token="alice-token")
+    assert "errors" not in body, body
+    titles = {row["title"] for row in body["data"]["books"]}
+    assert "Secret Alice" in titles
+
+
+def test_rls_nested_anonymous_does_not_leak(graphql_client):
+    """RLS holds through a nested relation load, not just the root query.
+
+    The strawberry-orm docs warn that parent scoping does not flow to children;
+    here the role-scoped session must make the nested books load honour RLS too.
+    """
+    body = graphql_client("{ authors { name booksCollection { title } } }")
+    assert "errors" not in body, body
+    by_author = {a["name"]: {b["title"] for b in a["booksCollection"]} for a in body["data"]["authors"]}
+    # Anonymous: Alice's nested books exclude the private one.
+    assert "Secret Alice" not in by_author.get("Alice", set())
+    assert "Public Alice" in by_author.get("Alice", set())
+
+
 def test_graphql_nested_relationship_is_bounded(configured_app, graphql_client):
     """Nested author->books query issues a bounded number of SELECTs (no N+1)."""
     from sqlalchemy import event
