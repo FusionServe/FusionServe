@@ -7,6 +7,8 @@ deterministic helpers that drive REST and GraphQL schema generation.
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
 from sqlalchemy import (
     Column,
     DateTime,
@@ -22,6 +24,7 @@ from sqlalchemy.ext.automap import automap_base
 
 from fusionserve.models import SmartComment
 from fusionserve.persistence import (
+    _assign_view_primary_keys,
     _name_for_collection_relationship,
     _name_for_scalar_relationship,
     pydantic_field_from_column,
@@ -64,7 +67,10 @@ def test_parse_comments_with_frontmatter_splits_metadata_and_content():
     comment = "---\nrole: admin\nlabel: Users\n---\nThe users table.\n"
     table = _make_table(comment=comment)
     result = SmartComment.from_object(table)
-    assert result.metadata == {"role": "admin", "label": "Users"}
+    assert result.metadata is not None
+    # Unknown keys are preserved verbatim via ``extra="allow"``.
+    assert result.metadata.model_extra == {"role": "admin", "label": "Users"}
+    assert result.metadata.primary_key is None
     assert result.content == "The users table.\n"
 
 
@@ -76,6 +82,78 @@ def test_parse_comments_with_invalid_yaml_falls_back_to_plain_content():
     result = SmartComment.from_object(table)
     assert result.metadata is None
     assert result.content == comment
+
+
+def test_parse_comments_primary_key_string_is_coerced_to_list():
+    comment = "---\nprimary_key: id\n---\nA view.\n"
+    table = _make_table(comment=comment)
+    result = SmartComment.from_object(table)
+    assert result.metadata is not None
+    assert result.metadata.primary_key == ["id"]
+
+
+def test_parse_comments_primary_key_list_is_preserved():
+    comment = "---\nprimary_key: [tenant_id, id]\n---\n"
+    table = _make_table(comment=comment)
+    result = SmartComment.from_object(table)
+    assert result.metadata is not None
+    assert result.metadata.primary_key == ["tenant_id", "id"]
+
+
+def test_parse_comments_invalid_primary_key_raises():
+    # Well-formed YAML but invalid metadata: fail-fast per the parsing contract.
+    comment = "---\nprimary_key: 123\n---\n"
+    table = _make_table(comment=comment)
+    with pytest.raises(ValidationError):
+        SmartComment.from_object(table)
+
+
+# --- _assign_view_primary_keys ----------------------------------------------
+
+
+def _view_metadata(comment: str | None) -> tuple[MetaData, Table]:
+    metadata = MetaData()
+    view = Table(
+        "active_users",
+        metadata,
+        Column("id", Integer),
+        Column("email", String),
+        comment=comment,
+    )
+    return metadata, view
+
+
+def test_assign_view_primary_keys_injects_declared_pk_and_maps():
+    metadata, view = _view_metadata("---\nprimary_key: id\n---\n")
+    mapped = _assign_view_primary_keys(metadata, {"active_users"})
+    assert mapped == {"active_users"}
+    assert [c.name for c in view.primary_key.columns] == ["id"]
+
+    Base = automap_base(metadata=metadata)
+    Base.prepare()
+    assert "active_users" in Base.classes
+
+
+def test_assign_view_primary_keys_skips_view_without_declaration():
+    metadata, view = _view_metadata("Just a description, no frontmatter.")
+    mapped = _assign_view_primary_keys(metadata, {"active_users"})
+    assert mapped == set()
+    assert len(view.primary_key.columns) == 0
+
+
+def test_assign_view_primary_keys_skips_unknown_column():
+    metadata, view = _view_metadata("---\nprimary_key: does_not_exist\n---\n")
+    mapped = _assign_view_primary_keys(metadata, {"active_users"})
+    assert mapped == set()
+    assert len(view.primary_key.columns) == 0
+
+
+def test_assign_view_primary_keys_ignores_non_view_tables():
+    metadata, view = _view_metadata("---\nprimary_key: id\n---\n")
+    # Not listed as a view -> left untouched even though it declares a pk.
+    mapped = _assign_view_primary_keys(metadata, set())
+    assert mapped == set()
+    assert len(view.primary_key.columns) == 0
 
 
 # --- pydantic_field_from_column ---------------------------------------------

@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import inflect as _inflect
 from pydantic import Field, TypeAdapter
-from sqlalchemy import DDL, Column, MetaData, Select, create_engine, func, text
+from sqlalchemy import DDL, Column, MetaData, PrimaryKeyConstraint, Select, create_engine, func, inspect, text
 from sqlalchemy.engine import URL, Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.automap import (
@@ -30,6 +30,7 @@ from .models import (
     FunctionSkip,
     Introspection,
     PgFunctionInfo,
+    SmartComment,
 )
 
 _logger = logging.getLogger(settings.app_name)
@@ -261,21 +262,76 @@ def _name_for_collection_relationship(base, local_cls, referred_cls, constraint:
     return _disambiguate(derived, taken)
 
 
+def _assign_view_primary_keys(metadata: MetaData, view_names: set[str]) -> set[str]:
+    """Inject smart-comment-declared primary keys onto reflected view tables.
+
+    SQLAlchemy's automap only maps a :class:`~sqlalchemy.schema.Table` that has
+    a primary key, but (materialized or plain) views carry none in the
+    PostgreSQL catalogue. This helper reads each view's smart comment and, when
+    it declares a ``primary_key``, appends a matching
+    :class:`~sqlalchemy.schema.PrimaryKeyConstraint` so the subsequent
+    ``automap`` ``prepare()`` pass maps the view to an ORM class.
+
+    Must be called **before** :func:`sqlalchemy.ext.automap.automap_base` is
+    prepared. Views that declare no usable primary key are left untouched (and
+    therefore stay unmapped) with a logged warning.
+
+    Args:
+        metadata: The reflected :class:`~sqlalchemy.schema.MetaData`.
+        view_names: Names of reflected relations that are views (plain or
+            materialized).
+
+    Returns:
+        The subset of ``view_names`` that received a primary key and will be
+        mapped by automap.
+    """
+    mapped: set[str] = set()
+    for table in metadata.sorted_tables:
+        if table.name not in view_names:
+            continue
+        comment_metadata = SmartComment.from_object(table).metadata
+        primary_key = comment_metadata.primary_key if comment_metadata else None
+        if not primary_key:
+            _logger.warning(
+                "Skipping view %s: no primary_key declared in its smart comment; "
+                "add a 'primary_key' frontmatter entry to expose it.",
+                table.name,
+            )
+            continue
+        missing = [name for name in primary_key if name not in table.columns]
+        if missing:
+            _logger.warning(
+                "Skipping view %s: declared primary_key column(s) %s not found on the view.",
+                table.name,
+                missing,
+            )
+            continue
+        table.append_constraint(PrimaryKeyConstraint(*primary_key))
+        _logger.debug("Assigned primary key %s to view %s", primary_key, table.name)
+        mapped.add(table.name)
+    return mapped
+
+
 def introspect() -> Introspection:
     """Reflect the configured PostgreSQL schema and return its full description.
 
     Uses a synchronous psycopg engine because SQLAlchemy reflection requires
-    a sync dialect. Performs three things in order on the same engine:
+    a sync dialect. Performs four things in order on the same engine:
 
     1. Installs the ``current_user_id()`` SQL function in
        ``settings.pg_app_schema`` (idempotently, on every startup).
-    2. Reflects every table in that schema into a SQLAlchemy automap ``Base``.
+    2. Reflects every table and view in that schema into a SQLAlchemy automap
+       ``Base``. Views carry no primary key in the catalogue, so
+       :func:`_assign_view_primary_keys` injects the one declared in each
+       view's smart comment before ``automap`` is prepared; undeclared views
+       stay unmapped.
     3. Discovers ``STABLE`` / ``IMMUTABLE`` functions in that schema via
        :func:`_introspect_functions` for the custom-query feature.
 
     Returns:
         An :class:`~fusionserve.models.Introspection` bundling the automap
-        ``base`` with the list of supported ``functions``.
+        ``base`` with the list of supported ``functions`` and the set of
+        mapped read-only ``views``.
 
     Raises:
         ValueError: If any reflected table has a non-plural name.
@@ -291,10 +347,15 @@ def introspect() -> Introspection:
         _logger.debug("Running DDL to create %s.current_user_id() function", schema)
         connection.execute(_current_user_id_ddl(schema))
         metadata = MetaData()
-        metadata.reflect(bind=_engine, schema=schema)
+        metadata.reflect(bind=_engine, schema=schema, views=True)
         for table in metadata.sorted_tables:
             if not inflect.singular_noun(table.name):
                 raise ValueError(f"Table name {table.name} is not plural")
+        inspector = inspect(_engine)
+        view_names = set(inspector.get_view_names(schema=schema)) | set(
+            inspector.get_materialized_view_names(schema=schema)
+        )
+        views = _assign_view_primary_keys(metadata, view_names)
         base = automap_base(metadata=metadata)
         # Pass custom naming callbacks so tables with multiple FKs to the same
         # target get unique, semantically meaningful relationship names instead
@@ -306,7 +367,7 @@ def introspect() -> Introspection:
         )
         known_tables = {t.name for t in metadata.sorted_tables}
         functions = _introspect_functions(connection, schema, known_tables)
-    return Introspection(base=base, functions=functions)
+    return Introspection(base=base, functions=functions, views=views)
 
 
 async def set_role(session: AsyncSession, user: User | None):

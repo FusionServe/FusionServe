@@ -23,12 +23,12 @@ _logger = logging.getLogger(settings.app_name)
 @asynccontextmanager
 async def lifespan(app: Litestar):
     # ---- startup ----
-    schema = introspect()
-    for controller in rest.build(schema.base):
+    introspection = introspect()
+    for controller in rest.build(introspection):
         app.register(controller)
-    for controller in rest.build_function_controllers(schema):
+    for controller in rest.build_function_controllers(introspection):
         app.register(controller)
-    app.register(graphql.build(schema))
+    app.register(graphql.build(introspection))
     yield
 
 
