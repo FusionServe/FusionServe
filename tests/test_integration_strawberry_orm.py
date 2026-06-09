@@ -42,16 +42,16 @@ from testcontainers.postgres import PostgresContainer  # noqa: E402
 _TOKEN_ROLES = {"alice-token": "app_author"}
 
 
-def _nodes(connection: dict) -> list[dict]:
-    """Extract the node dicts from a relay connection payload."""
+def _edge_nodes(connection: dict) -> list[dict]:
+    """Extract node dicts from a connection's ``edges``."""
     return [edge["node"] for edge in connection["edges"]]
 
 
-def _raw_pk(global_id: str) -> int:
-    """Decode a relay GlobalID (base64 of ``Type:value``) to its integer PK."""
+def _decode_cursor(cursor: str) -> str:
+    """Decode a connection cursor to its ``<Type>:<pk|pk>`` string form."""
     import base64
 
-    return int(base64.b64decode(global_id).decode().split(":", 1)[1])
+    return base64.b64decode(cursor).decode()
 
 
 @pytest.fixture(scope="module")
@@ -112,6 +112,18 @@ def postgres_container():
                         """
                     )
                 )
+                # Composite-PK table to exercise composite cursors / keyset.
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE TABLE "{schema}".book_tags (
+                            book_id integer NOT NULL REFERENCES "{schema}".books(id),
+                            tag text NOT NULL,
+                            PRIMARY KEY (book_id, tag)
+                        );
+                        """
+                    )
+                )
                 conn.execute(
                     text(
                         f"""
@@ -159,7 +171,10 @@ Joined view of books and their author names.';
                     text(f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "{schema}" TO app_author, app_writer')
                 )
                 conn.execute(
-                    text(f'GRANT SELECT ON "{schema}".authors, "{schema}".books, "{schema}".book_summaries TO app_anon')
+                    text(
+                        f'GRANT SELECT ON "{schema}".authors, "{schema}".books, '
+                        f'"{schema}".book_tags, "{schema}".book_summaries TO app_anon'
+                    )
                 )
                 # RLS on books: anon sees only public rows; app_author sees all.
                 conn.execute(text(f'ALTER TABLE "{schema}".books ENABLE ROW LEVEL SECURITY'))
@@ -184,6 +199,14 @@ Joined view of books and their author names.';
                             (1, 'Public Alice', 'public', '{{"genre": "fiction"}}'),
                             (1, 'Secret Alice', 'private', NULL),
                             (2, 'Public Bob', 'public', NULL);
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        f"""
+                        INSERT INTO "{schema}".book_tags (book_id, tag) VALUES
+                            (1, 'classic'), (1, 'fiction'), (3, 'humor');
                         """
                     )
                 )
@@ -274,32 +297,108 @@ def test_introspect_finds_tables_and_view(configured_app):
     assert "book_summaries" in introspection.views
 
 
-def test_graphql_connection_anonymous_authors(graphql_client):
-    """WS4: top-level authors is a relay connection (edges/node)."""
-    body = graphql_client("{ authors { edges { node { name } } } }")
-    assert "errors" not in body, body
-    names = {n["name"] for n in _nodes(body["data"]["authors"])}
-    assert {"Alice", "Bob"} <= names
-
-
-def test_graphql_connection_total_count_and_pagination(graphql_client):
-    """WS4: connections expose totalCount and cursor pagination (first/after)."""
-    body = graphql_client(
-        "{ authors(first: 1, order: [{ field: { id: ASC } }]) "
-        "  { totalCount edges { node { name } } pageInfo { hasNextPage endCursor } } }"
-    )
+def test_connection_edges_and_nodes_shapes(graphql_client):
+    """The connection exposes both edges{cursor node} and a flat nodes list."""
+    body = graphql_client("{ authors { totalCount edges { cursor node { name } } nodes { name } } }")
     assert "errors" not in body, body
     conn = body["data"]["authors"]
     assert conn["totalCount"] == 2
-    assert [n["name"] for n in _nodes(conn)] == ["Alice"]
+    assert {n["name"] for n in _edge_nodes(conn)} == {"Alice", "Bob"}
+    assert {n["name"] for n in conn["nodes"]} == {"Alice", "Bob"}
+    assert all(e["cursor"] for e in conn["edges"])
+
+
+def test_connection_native_id_is_raw(graphql_client):
+    """Native PK columns are visible as raw values (no relay GlobalID)."""
+    body = graphql_client("{ authors(order: [{ field: { id: ASC } }]) { edges { node { id name } } } }")
+    assert "errors" not in body, body
+    ids = [n["id"] for n in _edge_nodes(body["data"]["authors"])]
+    assert ids == [1, 2]  # raw integers, not opaque global ids
+
+
+def test_connection_cursor_format(graphql_client):
+    """Cursor is base64('<Type>:<pk|pk>') when ordering defaults to the PK."""
+    body = graphql_client("{ authors(order: [{ field: { id: ASC } }]) { edges { cursor node { id } } } }")
+    assert "errors" not in body, body
+    edges = body["data"]["authors"]["edges"]
+    assert _decode_cursor(edges[0]["cursor"]) == "Author:1"
+    assert _decode_cursor(edges[1]["cursor"]) == "Author:2"
+
+
+def test_connection_keyset_pagination_by_pk(graphql_client):
+    """first/after keyset pagination over the default PK ordering."""
+    page1 = graphql_client(
+        "{ authors(first: 1, order: [{ field: { id: ASC } }]) "
+        "  { totalCount edges { node { name } } pageInfo { hasNextPage endCursor } } }"
+    )
+    conn = page1["data"]["authors"]
+    assert conn["totalCount"] == 2
+    assert [n["name"] for n in _edge_nodes(conn)] == ["Alice"]
     assert conn["pageInfo"]["hasNextPage"] is True
     cursor = conn["pageInfo"]["endCursor"]
-    body2 = graphql_client(
+    page2 = graphql_client(
         f'{{ authors(first: 1, after: "{cursor}", order: [{{ field: {{ id: ASC }} }}]) '
-        "  { edges { node { name } } } }"
+        "  { edges { node { name } } pageInfo { hasNextPage } } }"
     )
-    assert "errors" not in body2, body2
-    assert [n["name"] for n in _nodes(body2["data"]["authors"])] == ["Bob"]
+    assert "errors" not in page2, page2
+    assert [n["name"] for n in _edge_nodes(page2["data"]["authors"])] == ["Bob"]
+    assert page2["data"]["authors"]["pageInfo"]["hasNextPage"] is False
+
+
+def test_connection_keyset_pagination_honours_order(graphql_client):
+    """Keyset cursors honour a non-PK order; cursor encodes the sort key + PK."""
+    page1 = graphql_client(
+        "{ books(first: 1, order: [{ field: { title: ASC } }]) "
+        "  { edges { cursor node { title } } pageInfo { endCursor } } }",
+        token="alice-token",
+    )
+    edges = page1["data"]["books"]["edges"]
+    assert [n["title"] for n in (e["node"] for e in edges)] == ["Public Alice"]
+    # cursor key = title|id  ->  'Book:Public%20Alice|1'
+    assert _decode_cursor(edges[0]["cursor"]).startswith("Book:Public%20Alice|")
+    cursor = page1["data"]["books"]["pageInfo"]["endCursor"]
+    page2 = graphql_client(
+        f'{{ books(first: 1, after: "{cursor}", order: [{{ field: {{ title: ASC }} }}]) '
+        "  { edges { node { title } } } }",
+        token="alice-token",
+    )
+    assert [e["node"]["title"] for e in page2["data"]["books"]["edges"]] == ["Public Bob"]
+
+
+def test_connection_limit_offset(graphql_client):
+    """limit/offset pagination honours order and reports hasPreviousPage."""
+    body = graphql_client(
+        "{ authors(limit: 1, offset: 1, order: [{ field: { id: ASC } }]) "
+        "  { nodes { name } pageInfo { hasPreviousPage hasNextPage } } }"
+    )
+    assert "errors" not in body, body
+    conn = body["data"]["authors"]
+    assert [n["name"] for n in conn["nodes"]] == ["Bob"]
+    assert conn["pageInfo"]["hasPreviousPage"] is True
+    assert conn["pageInfo"]["hasNextPage"] is False
+
+
+def test_connection_composite_pk(graphql_client):
+    """Composite-PK table works; cursor encodes both PK columns joined by '|'."""
+    body = graphql_client(
+        "{ bookTags(order: [{ field: { bookId: ASC } }, { field: { tag: ASC } }]) "
+        "  { totalCount edges { cursor node { bookId tag } } } }"
+    )
+    assert "errors" not in body, body
+    conn = body["data"]["bookTags"]
+    assert conn["totalCount"] == 3
+    first = conn["edges"][0]
+    assert (first["node"]["bookId"], first["node"]["tag"]) == (1, "classic")
+    assert _decode_cursor(first["cursor"]) == "BookTag:1|classic"
+
+
+def test_connection_nodes_shape_eager_loads_to_one(graphql_client):
+    """Nested to-one under the flat `nodes` shape eager-loads (no lazy-load error)."""
+    body = graphql_client(
+        "{ books(order: [{ field: { id: ASC } }]) { nodes { title author { name } } } }", token="alice-token"
+    )
+    assert "errors" not in body, body
+    assert body["data"]["books"]["nodes"][0]["author"]["name"] == "Alice"
 
 
 def test_graphql_pk_lookup(graphql_client):
@@ -320,7 +419,7 @@ def test_graphql_nested_relationship(graphql_client):
         token="alice-token",
     )
     assert "errors" not in body, body
-    authors = {n["name"]: {b["title"] for b in n["books"]} for n in _nodes(body["data"]["authors"])}
+    authors = {n["name"]: {b["title"] for b in n["books"]} for n in _edge_nodes(body["data"]["authors"])}
     # app_author sees all of Alice's books (public + private).
     assert {"Public Alice", "Secret Alice"} <= authors["Alice"]
 
@@ -358,7 +457,7 @@ def test_filter_object_traversal_cyclic_limitation(graphql_client):
         token="alice-token",
     )
     assert "errors" not in body, body
-    assert {n["title"] for n in _nodes(body["data"]["books"])} == {"Public Alice", "Secret Alice"}
+    assert {n["title"] for n in _edge_nodes(body["data"]["books"])} == {"Public Alice", "Secret Alice"}
 
 
 def test_function_set_returning(graphql_client):
@@ -394,7 +493,7 @@ def test_graphql_jsonb_column(graphql_client):
         token="alice-token",
     )
     assert "errors" not in body, body
-    assert _nodes(body["data"]["books"])[0]["attributes"] == {"genre": "fiction"}
+    assert _edge_nodes(body["data"]["books"])[0]["attributes"] == {"genre": "fiction"}
 
 
 def test_graphql_to_one_relationship(graphql_client):
@@ -404,7 +503,7 @@ def test_graphql_to_one_relationship(graphql_client):
         token="alice-token",
     )
     assert "errors" not in body, body
-    first = _nodes(body["data"]["books"])[0]
+    first = _edge_nodes(body["data"]["books"])[0]
     assert first["author"]["name"] == "Alice"
 
 
@@ -414,7 +513,7 @@ def test_graphql_native_filter(graphql_client):
         '{ authors(filter: { field: { name: { exact: "Bob" } } }) { edges { node { name } } } }',
     )
     assert "errors" not in body, body
-    names = [n["name"] for n in _nodes(body["data"]["authors"])]
+    names = [n["name"] for n in _edge_nodes(body["data"]["authors"])]
     assert names == ["Bob"]
 
 
@@ -422,7 +521,7 @@ def test_rls_anonymous_sees_only_public_books(graphql_client):
     """RLS: an anonymous request (app_anon role) sees only public books."""
     body = graphql_client("{ books { edges { node { title visibility } } } }")
     assert "errors" not in body, body
-    titles = {n["title"] for n in _nodes(body["data"]["books"])}
+    titles = {n["title"] for n in _edge_nodes(body["data"]["books"])}
     assert titles == {"Public Alice", "Public Bob"}
     assert "Secret Alice" not in titles
 
@@ -431,7 +530,7 @@ def test_rls_authenticated_sees_all_books(graphql_client):
     """RLS: an authenticated request (app_author role) sees private books too."""
     body = graphql_client("{ books { edges { node { title } } } }", token="alice-token")
     assert "errors" not in body, body
-    titles = {n["title"] for n in _nodes(body["data"]["books"])}
+    titles = {n["title"] for n in _edge_nodes(body["data"]["books"])}
     assert "Secret Alice" in titles
 
 
@@ -443,7 +542,7 @@ def test_rls_nested_anonymous_does_not_leak(graphql_client):
     """
     body = graphql_client("{ authors { edges { node { name books { title } } } } }")
     assert "errors" not in body, body
-    by_author = {n["name"]: {b["title"] for b in n["books"]} for n in _nodes(body["data"]["authors"])}
+    by_author = {n["name"]: {b["title"] for b in n["books"]} for n in _edge_nodes(body["data"]["authors"])}
     # Anonymous: Alice's nested books exclude the private one.
     assert "Secret Alice" not in by_author.get("Alice", set())
     assert "Public Alice" in by_author.get("Alice", set())
@@ -455,8 +554,7 @@ def test_mutation_create_and_delete(graphql_client):
     assert "errors" not in body, body
     created = body["data"]["createAuthor"]
     assert created["name"] == "Carol"
-    # Returned ``id`` is a relay GlobalID; decode to the raw PK for delete-by-pk.
-    raw = _raw_pk(created["id"])
+    raw = created["id"]  # native raw integer PK (no relay GlobalID)
 
     body = graphql_client(f"mutation {{ deleteAuthor(id: {raw}) {{ name }} }}", token="alice-token")
     assert "errors" not in body, body
@@ -484,7 +582,7 @@ def test_mutation_create_many_and_delete_many(graphql_client):
 def test_mutation_update_by_pk(graphql_client):
     """update<Singular> patches a single record by primary key."""
     created = graphql_client('mutation { createAuthor(input: { name: "ToRename" }) { id } }', token="alice-token")
-    raw = _raw_pk(created["data"]["createAuthor"]["id"])
+    raw = created["data"]["createAuthor"]["id"]
     try:
         body = graphql_client(
             f'mutation {{ updateAuthor(id: {raw}, patch: {{ name: "Renamed" }}) {{ name }} }}',
@@ -574,6 +672,6 @@ def test_graphql_nested_relationship_is_bounded(configured_app, graphql_client):
         event.remove(sync_engine, "after_cursor_execute", _count)
     assert "errors" not in body, body
     # 2 seeded authors; a per-row (N+1) load would scale with author count.
-    # Expect ~2 SELECTs (authors, then a single batched books load) plus minor
-    # connection overhead — bounded well under a per-author count.
-    assert len(selects) <= 5, f"unexpected SELECT count {len(selects)}: {selects}"
+    # Expect ~3 SELECTs (totalCount, authors, then a single batched books load)
+    # plus minor overhead — bounded well under a per-author count.
+    assert len(selects) <= 6, f"unexpected SELECT count {len(selects)}: {selects}"

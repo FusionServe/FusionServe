@@ -31,25 +31,40 @@ A single per-build `StrawberryORM.for_sqlalchemy(...)` instance drives the proce
 
 ## Queries
 
-### Connections (relay)
+### Connections
 
-Each table with a single-column primary key is exposed as a relay node, and its top-level query is a connection with `edges`/`node`/`pageInfo` and `totalCount`:
+Every table's top-level query is a custom connection (`fusionserve.connections`)
+exposing both a relay-style `edges { cursor node }` shape and a flat `nodes`
+list, plus `pageInfo` and `totalCount`. Native PK columns stay visible (no
+opaque global id), and **composite primary keys are supported**.
 
 ```graphql
 query {
   users(first: 10, after: "…", filter: { field: { name: { exact: "Ada" } } }, order: [{ field: { name: ASC } }]) {
     totalCount
     edges { cursor node { id name email } }
-    pageInfo { hasNextPage endCursor }
+    nodes { id name }
+    pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
   }
 }
 ```
 
-Composite-PK tables fall back to a plain list field (no relay node id).
+**Pagination** has two mutually-exclusive modes:
+
+- **Cursor (keyset):** `first`/`after`/`last`/`before`. Honours the `order`
+  argument with the primary key appended as a stable tiebreaker.
+- **Limit/offset:** `limit`/`offset`, honouring `order` (incl. relation
+  ordering).
+
+**Cursor format:** `base64("<Type>:<v1|v2|…>")` where the values are the row's
+effective sort key — the `order` columns followed by the PK column(s). With no
+`order`, the key is just the PK, e.g. `base64("Author:1")`; for a composite-PK
+row, `base64("BookTag:1|classic")`. Cursors are valid for the same `order`.
 
 ### Primary-key lookup
 
-A `<singular>(…pk args)` field returns a single record by primary key (raw column values, not a relay global id).
+A `<singular>(…pk args)` field returns a single record by primary key (raw
+column values).
 
 ### Filtering & ordering
 

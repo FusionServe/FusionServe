@@ -43,7 +43,6 @@ import strawberry
 from pydantic.alias_generators import to_pascal
 from sqlalchemy import delete, event, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from strawberry import relay
 from strawberry.annotation import StrawberryAnnotation
 from strawberry.extensions import QueryDepthLimiter
 from strawberry.litestar import (
@@ -56,12 +55,12 @@ from strawberry.scalars import JSON as StrawberryJSON
 from strawberry.types.arguments import StrawberryArgument
 from strawberry.utils.str_converters import to_camel_case
 from strawberry_orm import StrawberryORM
-from strawberry_orm.relay import ORMListConnection
 
 from . import auth
 from .config import settings
+from .connections import build_connection_field
 from .models import FunctionInfo, FunctionReturnKind, Introspection, RecordNotFoundError, SmartComment
-from .persistence import async_session, inflect, role_config_statement, set_role
+from .persistence import async_session, inflect, role_config_statement
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -124,6 +123,8 @@ def _reapply_role_on_begin(session, transaction, connection) -> None:
     ``session.info`` where :func:`custom_context_getter` stashes it.
     """
     user = session.info.get("fs_user")
+    role = settings.anonymous_role if not user else user.role
+    _logger.debug("Setting role to %s", role)
     connection.execute(role_config_statement(user))
 
 
@@ -151,10 +152,9 @@ async def custom_context_getter(request: litestar.Request) -> AsyncGenerator[Cus
     """
     session = async_session()
     session.info["fs_user"] = request.user
+    # The after_begin hook applies the role to every transaction the session
+    # opens (initial + post-commit), so no explicit set_role is needed here.
     event.listen(session.sync_session, "after_begin", _reapply_role_on_begin)
-    # Apply immediately so the role is set even if the first statement does not
-    # implicitly begin via the ORM event (defensive; after_begin also covers it).
-    await set_role(session, request.user)
     try:
         yield CustomContext(session=session)
     finally:
@@ -391,18 +391,11 @@ def build(introspection: Introspection):
     generated_module = _types_mod.ModuleType(_GENERATED_MODULE)
     sys.modules[_GENERATED_MODULE] = generated_module
     bare_types: dict[type, type] = {}
-    # Tables with a single-column PK are exposed as relay nodes (and their
-    # top-level query as a relay connection); composite-PK tables can't carry a
-    # single ``relay.NodeID`` so they fall back to a plain list field.
-    single_pk: dict[type, bool] = {}
     for orm_class in orm_classes:
         orm.filter(orm_class)
         orm.order(orm_class)
         name = _gql_type_name(orm_class)
-        is_single_pk = len(orm_class.__table__.primary_key.columns) == 1
-        single_pk[orm_class] = is_single_pk
-        bases = (relay.Node,) if is_single_pk else ()
-        cls = type(name, bases, {})
+        cls = type(name, (), {})
         cls.__module__ = _GENERATED_MODULE
         cls.__orm_model__ = orm_class
         cls.__orm_filter__ = filter_registry.get(orm_class)
@@ -419,14 +412,9 @@ def build(introspection: Introspection):
         cls = bare_types[orm_class]
         table = orm_class.__table__
         table_name = table.name
-        pk_column = table.primary_key.columns[0] if single_pk[orm_class] else None
         annotations: dict[str, Any] = {}
         for column in table.columns:
-            if column is pk_column:
-                # Mark the single PK column as the relay node id.
-                annotations[column.name] = relay.NodeID[column.type.python_type]  # type: ignore[misc]
-            else:
-                annotations[column.name] = _column_annotation(column)
+            annotations[column.name] = _column_annotation(column)
         for rel_name, rel in orm_class.__mapper__.relationships.items():
             target = bare_types.get(rel.mapper.class_)
             if target is None:
@@ -442,19 +430,17 @@ def build(introspection: Introspection):
         _apply_descriptions(gql_type, table)
         gql_types[orm_class] = gql_type
 
-        # ---- Query: list/connection field. ----
-        if single_pk[orm_class]:
-            # Relay connection (edges/pageInfo/totalCount + filter/order args).
-            conn_field = orm.connection()
-            Query.__annotations__[table_name] = ORMListConnection[gql_type]
-            setattr(Query, table_name, conn_field)
-            conn_field.__set_name__(Query, table_name)
-        else:
-            # Composite-PK fallback: plain list field.
-            list_field = orm.field(description=f"List {table_name} with filtering and ordering.")
-            Query.__annotations__[table_name] = list[gql_type]
-            setattr(Query, table_name, list_field)
-            list_field.__set_name__(Query, table_name)
+        # ---- Query: connection field (cursor + limit/offset pagination). ----
+        conn_field = build_connection_field(
+            orm,
+            orm_class,
+            gql_type,
+            cls.__orm_filter__,
+            cls.__orm_order__,
+            _gql_type_name(orm_class),
+            description=f"List {table_name} with filtering, ordering and pagination.",
+        )
+        setattr(Query, table_name, conn_field)
 
         # ---- Query: primary-key lookup field. ----
         _attach_pk_field(Query, orm_class, gql_type)
@@ -540,8 +526,12 @@ def _attach_mutations(mutation_cls: type, orm: StrawberryORM, orm_class: type, g
     table = orm_class.__table__
     pks = list(table.primary_key.columns.keys())
     singular = inflect.singular_noun(table.name) or table.name
-    input_type = orm.input(orm_class)
-    patch_type = orm.partial(orm_class)
+    # Pure join tables (every column is part of the PK) have no non-PK columns:
+    # the create input must then *include* the PK columns (otherwise it's empty
+    # and GraphQL rejects it), and there is nothing to patch, so update
+    # mutations are skipped.
+    has_non_pk = any(col.name not in pks for col in table.columns)
+    input_type = orm.input(orm_class) if has_non_pk else orm.input(orm_class, exclude_pk=False)
     where_type = orm.backend._filter_registry.get(orm_class)
 
     def _condition_from_where(where: object):
@@ -645,24 +635,30 @@ def _attach_mutations(mutation_cls: type, orm: StrawberryORM, orm_class: type, g
         [StrawberryArgument("inputs", None, StrawberryAnnotation(list[input_type]))],
     )
 
-    update_one = strawberry.mutation(resolver=update_resolver, description=f"Update a {singular} by primary key.")
-    update_one.type_annotation = single
-    setattr(mutation_cls, f"update{to_pascal(singular)}", update_one)
-    _set_resolver_arguments(
-        update_one,
-        [StrawberryArgument("patch", None, StrawberryAnnotation(patch_type)), *[_pk_argument(table, pk) for pk in pks]],
-    )
+    # Update mutations only exist when there are non-PK columns to patch.
+    if has_non_pk:
+        patch_type = orm.partial(orm_class)
+        update_one = strawberry.mutation(resolver=update_resolver, description=f"Update a {singular} by primary key.")
+        update_one.type_annotation = single
+        setattr(mutation_cls, f"update{to_pascal(singular)}", update_one)
+        _set_resolver_arguments(
+            update_one,
+            [
+                StrawberryArgument("patch", None, StrawberryAnnotation(patch_type)),
+                *[_pk_argument(table, pk) for pk in pks],
+            ],
+        )
 
-    update_many = strawberry.mutation(resolver=update_many_resolver, description=f"Update many {table.name}.")
-    update_many.type_annotation = many
-    setattr(mutation_cls, f"update{to_pascal(table.name)}", update_many)
-    _set_resolver_arguments(
-        update_many,
-        [
-            StrawberryArgument("patch", None, StrawberryAnnotation(patch_type)),
-            StrawberryArgument("where", None, StrawberryAnnotation(where_type)),
-        ],
-    )
+        update_many = strawberry.mutation(resolver=update_many_resolver, description=f"Update many {table.name}.")
+        update_many.type_annotation = many
+        setattr(mutation_cls, f"update{to_pascal(table.name)}", update_many)
+        _set_resolver_arguments(
+            update_many,
+            [
+                StrawberryArgument("patch", None, StrawberryAnnotation(patch_type)),
+                StrawberryArgument("where", None, StrawberryAnnotation(where_type)),
+            ],
+        )
 
     delete_one = strawberry.mutation(resolver=delete_resolver, description=f"Delete a {singular} by primary key.")
     delete_one.type_annotation = single

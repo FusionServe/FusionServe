@@ -36,6 +36,20 @@ def test_orm_registry_raises_on_missing_attribute():
         graphql._orm_registry(_Stub(), "_filter_registry")
 
 
+def test_nodes_added_to_optimizer_passthrough():
+    """Importing connections extends the optimizer passthrough set with ``nodes``.
+
+    This lets the flat ``nodes { … }`` connection shape eager-load nested to-one
+    relations (the lib ships with only ``edges``/``node``). Pins the internal so
+    a strawberry-orm change is caught.
+    """
+    from strawberry_orm.optimizer import selections
+
+    import fusionserve.connections  # noqa: F401  (import side effect)
+
+    assert "nodes" in selections._RELAY_PASSTHROUGH_FIELDS
+
+
 def test_custom_context_exposes_orm_stash_slots():
     """CustomContext declares the slots the orm filter/order + relay machinery writes."""
     ctx = graphql.CustomContext(session=None)
