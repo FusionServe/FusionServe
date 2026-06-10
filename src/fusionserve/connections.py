@@ -8,7 +8,8 @@ and offering no composite-PK support) with a connection that:
 * leaves the native PK columns visible as ordinary fields,
 * offers **cursor (keyset)** pagination (``first``/``after``/``last``/``before``)
   honouring the ``order`` argument, with the primary key appended as a stable
-  tiebreaker,
+  **descending** tiebreaker (newest-first by default, since PKs are typically
+  auto-increment integers or UUIDv7),
 * offers **limit/offset** pagination,
 * exposes both a relay-style shape (``edges { cursor node }``) and a flat
   ``nodes`` shape, plus ``pageInfo`` and ``totalCount``.
@@ -174,10 +175,14 @@ def _effective_key(order_input: Any, orm_class: type) -> list[_KeySpec]:
                     _KeySpec(col_name, column, dir_value.startswith("ASC"), _column_python_type(table, col_name))
                 )
                 seen.add(col_name)
+    # Append the PK as the tiebreaker, **descending**: PKs are typically
+    # auto-increment integers or UUIDv7, so DESC surfaces newest-first by
+    # default (no `order` → PK DESC) and breaks ties newest-first under an
+    # explicit order.
     for pk in table.primary_key.columns:
         if pk.name in seen:
             continue
-        specs.append(_KeySpec(pk.name, getattr(orm_class, pk.name), True, _column_python_type(table, pk.name)))
+        specs.append(_KeySpec(pk.name, getattr(orm_class, pk.name), False, _column_python_type(table, pk.name)))
         seen.add(pk.name)
     return specs
 
@@ -255,7 +260,7 @@ def build_connection_field(
             raise ValueError("Use either cursor pagination (first/after/last/before) or limit/offset, not both.")
 
         base = select(orm_class)
-        if filter not in (None, strawberry.UNSET):
+        if filter:
             base = orm.backend.apply_filters(base, filter, orm_class)
 
         session = info.context.session

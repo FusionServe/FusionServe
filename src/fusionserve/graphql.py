@@ -37,9 +37,9 @@ import types as _types_mod
 from collections.abc import AsyncGenerator
 from typing import Any
 
-import litestar
 import litestar.datastructures
 import strawberry
+from litestar import Request
 from pydantic.alias_generators import to_pascal
 from sqlalchemy import delete, event, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,7 +99,7 @@ class CustomContext(BaseContext, kw_only=True):
 class CustomHTTPContextType(HTTPContextType, CustomContext):
     """HTTP context combining Litestar HTTP context with the custom context."""
 
-    request: litestar.Request[auth.User, Any, litestar.datastructures.State]
+    request: Request[auth.User, Any, litestar.datastructures.State]
 
 
 class CustomWSContextType(WebSocketContextType, CustomContext):

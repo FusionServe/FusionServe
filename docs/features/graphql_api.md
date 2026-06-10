@@ -49,10 +49,14 @@ query {
 }
 ```
 
+**Default ordering** is **primary key descending** (newest-first — PKs are
+typically auto-increment integers or UUIDv7). An explicit `order` overrides it;
+the PK is still appended as a descending tiebreaker.
+
 **Pagination** has two mutually-exclusive modes:
 
 - **Cursor (keyset):** `first`/`after`/`last`/`before`. Honours the `order`
-  argument with the primary key appended as a stable tiebreaker.
+  argument with the primary key appended as a stable descending tiebreaker.
 - **Limit/offset:** `limit`/`offset`, honouring `order` (incl. relation
   ordering).
 

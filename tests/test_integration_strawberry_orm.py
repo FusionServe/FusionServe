@@ -316,6 +316,23 @@ def test_connection_native_id_is_raw(graphql_client):
     assert ids == [1, 2]  # raw integers, not opaque global ids
 
 
+def test_connection_default_order_is_pk_desc(graphql_client):
+    """With no `order`, results default to primary key DESC (newest first)."""
+    body = graphql_client("{ authors { edges { node { id } } } }")
+    assert "errors" not in body, body
+    ids = [n["id"] for n in _edge_nodes(body["data"]["authors"])]
+    assert ids == [2, 1]  # Bob (newer) before Alice
+
+    # Keyset paging follows the same DESC default.
+    page1 = graphql_client("{ authors(first: 1) { edges { node { id } } pageInfo { hasNextPage endCursor } } }")
+    conn = page1["data"]["authors"]
+    assert [n["id"] for n in _edge_nodes(conn)] == [2]
+    assert conn["pageInfo"]["hasNextPage"] is True
+    cursor = conn["pageInfo"]["endCursor"]
+    page2 = graphql_client(f'{{ authors(first: 1, after: "{cursor}") {{ edges {{ node {{ id }} }} }} }}')
+    assert [n["id"] for n in _edge_nodes(page2["data"]["authors"])] == [1]
+
+
 def test_connection_cursor_format(graphql_client):
     """Cursor is base64('<Type>:<pk|pk>') when ordering defaults to the PK."""
     body = graphql_client("{ authors(order: [{ field: { id: ASC } }]) { edges { cursor node { id } } } }")
