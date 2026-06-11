@@ -2,9 +2,9 @@
 
 ## Overview
 
-In addition to the REST API, FusionServe generates a **GraphQL schema** from the same introspected database metadata, exposing every table as a queryable type with built-in pagination and field-selection push-down.  The GraphQL endpoint is served at `/graphql` via [Strawberry](https://strawberry.rocks/) and [strawberry-sqlalchemy-mapper](https://pypi.org/project/strawberry-sqlalchemy-mapper/).
+In addition to the REST API, FusionServe generates a **GraphQL schema** from the same introspected database metadata, exposing every table as a queryable type with relay-style pagination, native filtering/ordering, relationship traversal, and full CRUD mutations. The endpoint is served at `/graphql` via [Strawberry](https://strawberry.rocks/) and [strawberry-orm](https://pypi.org/project/strawberry-orm/) (SQLAlchemy backend).
 
-> **Note:** The GraphQL API is currently in active development.  The feature is wired up at startup alongside the REST API.
+> **Note:** The GraphQL builder is wired up at startup alongside the REST API. It is built dynamically from live PostgreSQL introspection — there is no codegen step.
 
 ---
 
@@ -12,7 +12,7 @@ In addition to the REST API, FusionServe generates a **GraphQL schema** from the
 
 | Path | Description |
 |---|---|
-| `/graphql` | GraphQL Playground (interactive browser IDE) |
+| `/graphql` | GraphiQL (interactive browser IDE) and the POST endpoint |
 
 Queries via `GET` are disabled; only `POST` requests are accepted.
 
@@ -20,108 +20,102 @@ Queries via `GET` are disabled; only `POST` requests are accepted.
 
 ## Schema Generation
 
-At startup, [`build()`](../../src/fusionserve/graphql.py) iterates the models registry and:
+At startup, [`build()`](../../src/fusionserve/graphql.py) iterates the introspected automap classes (in a stable, name-sorted order) in two passes:
 
-1. Maps each ORM class to a Strawberry GraphQL type using `StrawberrySQLAlchemyMapper`.
-2. Attaches a resolver function to the root `Query` type for each table.
-3. Calls `mapper.finalize()` to resolve any related types automatically.
-4. Builds the final `strawberry.Schema` with all mapped types registered.
+1. **Loop A** — registers a native `orm.filter` and `orm.order` input type per table and pre-creates a bare GraphQL type class for every table (so cyclic relationships resolve).
+2. **Loop B** — decorates each type with `orm.type(...)`, applies smart-comment descriptions, and attaches its root fields (connection/pk query + CRUD mutations).
 
-```python
-mapper = StrawberrySQLAlchemyMapper()
-# ... map each table ...
-mapper.finalize()
-schema = strawberry.Schema(strawberry.type(Query), types=additional_types, ...)
-```
+A single per-build `StrawberryORM.for_sqlalchemy(...)` instance drives the process, and the schema is created with `orm.schema(...)` (the N+1 query optimizer is enabled by default). Custom-query fields are then added for STABLE/IMMUTABLE PostgreSQL functions.
 
 ---
 
-## Pagination Window
+## Queries
 
-Every table query returns a [`PaginationWindow`](../../src/fusionserve/graphql.py) wrapper type rather than a raw list, providing both the result nodes and the total dataset size in a single response:
+### Connections
 
-```graphql
-type PaginationWindow {
-  nodes: [<TableType>!]!        # records in this page
-  totalCount: Int!               # total matching records
-}
-```
-
-**Example query:**
+Every table's top-level query is a custom connection (`fusionserve.connections`)
+exposing both a relay-style `edges { cursor node }` shape and a flat `nodes`
+list, plus `pageInfo` and `totalCount`. Native PK columns stay visible (no
+opaque global id), and **composite primary keys are supported**.
 
 ```graphql
 query {
-  users(limit: 10, offset: 0) {
-    nodes {
-      id
-      name
-      email
-    }
+  users(first: 10, after: "…", filter: { field: { name: { exact: "Ada" } } }, order: [{ field: { name: ASC } }]) {
     totalCount
+    edges { cursor node { id name email } }
+    nodes { id name }
+    pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
   }
 }
 ```
 
-The `totalCount` is computed using a PostgreSQL window function (`COUNT() OVER()`) in the same query, so no second round-trip to the database is required.
+**Default ordering** is **primary key descending** (newest-first — PKs are
+typically auto-increment integers or UUIDv7). An explicit `order` overrides it;
+the PK is still appended as a descending tiebreaker.
+
+**Pagination** has two mutually-exclusive modes:
+
+- **Cursor (keyset):** `first`/`after`/`last`/`before`. Honours the `order`
+  argument with the primary key appended as a stable descending tiebreaker.
+- **Limit/offset:** `limit`/`offset`, honouring `order` (incl. relation
+  ordering).
+
+**Cursor format:** `base64("<Type>:<v1|v2|…>")` where the values are the row's
+effective sort key — the `order` columns followed by the PK column(s). With no
+`order`, the key is just the PK, e.g. `base64("Author:1")`; for a composite-PK
+row, `base64("BookTag:1|classic")`. Cursors are valid for the same `order`.
+
+### Primary-key lookup
+
+A `<singular>(…pk args)` field returns a single record by primary key (raw
+column values).
+
+### Filtering & ordering
+
+Filters are native `@oneOf` trees (`field`, `object`, `all`, `any`, `not`, `oneOf`); ordering is a list of `@oneOf` entries. See the [strawberry-orm docs](https://pypi.org/project/strawberry-orm/) for the full lookup shapes.
+
+> **Known limitation:** for a bidirectional (automap) relationship only one direction exposes a nested `object` filter; the wired direction is deterministic (name-sorted registration). See the design spec's friction log.
 
 ---
 
-## Resolver Arguments
+## Mutations
 
-Every auto-generated resolver accepts the following arguments:
+For every non-view table, six CRUD mutations are generated (RETURNING-based, single round-trip):
 
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `limit` | `Int` | `max_page_size` | Maximum records to return |
-| `offset` | `Int` | `0` | Records to skip |
-| `order_by` | `String` | `null` | Column name to sort by |
+| Mutation | Input |
+|---|---|
+| `create<Singular>` | `orm.input` |
+| `create<Plural>` | `[orm.input]` |
+| `update<Singular>` | `orm.partial` + pk args |
+| `update<Plural>` | `orm.partial` + `where` filter |
+| `delete<Singular>` | pk args |
+| `delete<Plural>` | `where` filter |
+
+`update<Plural>`/`delete<Plural>` reject an empty/`None`-resolving `where` to block accidental table-wide writes.
+
+> Mutation payloads should select scalar columns; selecting a nested relation on a mutation result is not currently supported (async lazy-load).
 
 ---
 
-## Field Selection Push-down
+## Custom queries from PostgreSQL functions
 
-The resolver inspects the GraphQL query's [`selected_fields`](../../src/fusionserve/graphql.py) and translates them into a SQLAlchemy `load_only()` directive.  Only the columns actually requested in the query are fetched from the database, reducing I/O for wide tables:
-
-```python
-statement = (
-    select(orm_class, func.count().over().label("total_count"))
-    .options(load_only(*get_selected_fields(info, gql_type)))
-    .limit(limit)
-    .offset(offset)
-)
-```
+Each STABLE/IMMUTABLE function in the app schema becomes a Query field (camelCased): `SCALAR` returns map to the mapped Python type, `ROW`/`SET` returns to the generated node type(s). Functions whose name collides with an existing field, or whose return table has no mapped type, are skipped with a logged warning.
 
 ---
 
 ## Query Depth Limiting
 
-To protect against deeply nested or circular queries, the schema is created with a [`QueryDepthLimiter`](https://strawberry.rocks/docs/extensions/query-depth-limiter) extension that rejects queries exceeding a nesting depth of **10**:
-
-```python
-extensions=[QueryDepthLimiter(max_depth=10)]
-```
+The schema is built with a [`QueryDepthLimiter`](https://strawberry.rocks/docs/extensions/query-depth-limiter) rejecting queries deeper than **10**.
 
 ---
 
-## Keep-Alive
+## Context & Row-Level Security
 
-The GraphQL router is configured with `keep_alive=True`, enabling WebSocket keep-alive pings for long-lived subscription or watch connections.
+Each request opens **one** `AsyncSession` ([`custom_context_getter`](../../src/fusionserve/graphql.py)) and stores it on the Strawberry context. The strawberry-orm backend's `session_getter` reuses that exact session for every query, optimizer eager-load, and nested relation load, so row-level security is consistent everywhere.
 
----
+The request's PostgreSQL role (via [`set_role`](../../src/fusionserve/persistence.py)) is **re-applied on every transaction the session opens** through an `after_begin` hook — so a mutation's post-commit work still runs under the request's role, while the transaction-local setting keeps pooled connections role-free. Unauthenticated requests use `settings.anonymous_role`.
 
-## Context
-
-Each request receives a context dictionary containing:
-
-| Key | Value |
+| Context attribute | Value |
 |---|---|
-| `session` | An active `AsyncSession` scoped to the request |
-| `sqlalchemy_loader` | A `StrawberrySQLAlchemyLoader` for efficient relationship loading |
-
-The session is provided via the same [`get_async_session`](../../src/fusionserve/persistence.py) dependency used by the REST API, ensuring consistent connection pooling and role enforcement across both APIs.
-
----
-
-## Role Enforcement
-
-Before executing the database query, every resolver calls [`set_role()`](../../src/fusionserve/persistence.py) to switch the PostgreSQL session to the configured `anonymous_role`, consistent with the REST API's security model.
+| `session` | The request's role-scoped `AsyncSession` |
+| `request` | The Litestar request (carries the authenticated user) |
