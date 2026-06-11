@@ -403,7 +403,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "sqlalchemy" },
     { name = "strawberry-graphql" },
-    { name = "strawberry-sqlalchemy-mapper" },
+    { name = "strawberry-orm", extra = ["sqlalchemy"] },
     { name = "typing-extensions" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -443,7 +443,7 @@ requires-dist = [
     { name = "python-multipart" },
     { name = "sqlalchemy" },
     { name = "strawberry-graphql" },
-    { name = "strawberry-sqlalchemy-mapper", specifier = ">=0.8.0" },
+    { name = "strawberry-orm", extras = ["sqlalchemy"] },
     { name = "typing-extensions" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.48.0" },
 ]
@@ -1541,15 +1541,6 @@ wheels = [
 ]
 
 [[package]]
-name = "sentinel"
-version = "1.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/4a/d8/49115169583d02b38e7d93909a474c7ed0863f7d4df27095588344f2e66a/sentinel-1.0.0.tar.gz", hash = "sha256:190928f9951af6e94a1f84eefcaed791c28097dd152b88e988906be300451fd2", size = 6981, upload-time = "2022-07-23T10:22:19.606Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/c4/37cd564e7c5ee72afc864e43b872c716ed43604e50ea0adbb510d720f92d/sentinel-1.0.0-py3-none-any.whl", hash = "sha256:24f02a34cc9f0fcba5a666a23b6c7f56aff332fc624632ee442e7237751a9f60", size = 6485, upload-time = "2022-07-23T10:22:16.826Z" },
-]
-
-[[package]]
 name = "setproctitle"
 version = "1.3.7"
 source = { registry = "https://pypi.org/simple" }
@@ -1602,20 +1593,6 @@ wheels = [
 ]
 
 [[package]]
-name = "sqlakeyset"
-version = "2.0.1775222100"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "packaging" },
-    { name = "python-dateutil" },
-    { name = "sqlalchemy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/75/18/0a06e22a66df13debde3eb799f7f31f17bf02242836f47a20e2c8c45e44c/sqlakeyset-2.0.1775222100.tar.gz", hash = "sha256:c2988c289181fa3615f3c091308a06001d83fa6ebc0591e7d18e08d8b92ee012", size = 114403, upload-time = "2026-04-03T13:15:03.428Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d0/f7/ff211cc8bc2968459b78a63c8b62b3b6819dff0abdfd260aa5ef012a73ec/sqlakeyset-2.0.1775222100-py3-none-any.whl", hash = "sha256:5004e671ddc7d9ecf105bcbd46c079b314cc6d413db3159e63a3567e51e28fa3", size = 27369, upload-time = "2026-04-03T13:15:02.219Z" },
-]
-
-[[package]]
 name = "sqlalchemy"
 version = "2.0.49"
 source = { registry = "https://pypi.org/simple" }
@@ -1641,11 +1618,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e5/30/8519fdde58a7bdf155b714359791ad1dc018b47d60269d5d160d311fdc36/sqlalchemy-2.0.49-py3-none-any.whl", hash = "sha256:ec44cfa7ef1a728e88ad41674de50f6db8cfdb3e2af84af86e0041aaf02d43d0", size = 1942158, upload-time = "2026-04-03T16:53:44.135Z" },
 ]
 
-[package.optional-dependencies]
-asyncio = [
-    { name = "greenlet" },
-]
-
 [[package]]
 name = "strawberry-graphql"
 version = "0.316.0"
@@ -1663,19 +1635,20 @@ wheels = [
 ]
 
 [[package]]
-name = "strawberry-sqlalchemy-mapper"
-version = "0.8.0"
+name = "strawberry-orm"
+version = "0.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "greenlet" },
-    { name = "sentinel" },
-    { name = "sqlakeyset" },
-    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "strawberry-graphql" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/86/ff/ccdc54830a357ca898aae2368807f6522f5a1bc2cefe24255f2d6c5ad026/strawberry_sqlalchemy_mapper-0.8.0.tar.gz", hash = "sha256:8de01e616d0afe8a325736ea5483a1d9f439b5febb0c43449fe68e157735da70", size = 30132, upload-time = "2025-12-01T19:18:09.624Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/60/22/4a14276c874f84611f47ad7e439f65932b9e7c142149f861d6f3f8739b50/strawberry_orm-0.13.0.tar.gz", hash = "sha256:e0d00f35f4a6e183e138d027ff9ae183457a97c62452c47da9f826bbd124344d", size = 105150, upload-time = "2026-05-28T21:54:52.598Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f2/1f/cae88ec6f0b45f983972801c0ba093f7332e4b099ff3b48bbc1c6bb937f8/strawberry_sqlalchemy_mapper-0.8.0-py3-none-any.whl", hash = "sha256:7341327c31898547ccbc3e50c01f8c1dc009af0fb90a5c71aeda857016fb870c", size = 29376, upload-time = "2025-12-01T19:18:08.699Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/e7/f39c9f060aa444797d559540cc77161dd9b8cc933db3ee06fef26e9d2f23/strawberry_orm-0.13.0-py3-none-any.whl", hash = "sha256:e8ea63a67ef9303826ddbfe177c157246086be93962ded2036ab0bb18d04e2c2", size = 100890, upload-time = "2026-05-28T21:54:51.134Z" },
+]
+
+[package.optional-dependencies]
+sqlalchemy = [
+    { name = "sqlalchemy" },
 ]
 
 [[package]]
