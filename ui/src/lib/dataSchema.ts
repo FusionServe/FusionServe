@@ -5,16 +5,21 @@ import { getIntrospectionQuery } from "graphql";
  *
  * The FusionServe GraphQL schema is generated at runtime from PostgreSQL,
  * so the SPA learns its shape via a standard introspection query rather
- * than codegen. The convention (see ``fusionserve.graphql.build``):
+ * than codegen. The convention (see ``fusionserve.graphql.build`` and
+ * ``fusionserve.connections``):
  *
  *   - Each database table is exposed as a Query field returning a
- *     ``<Row>PaginationWindow`` object ({ nodes, total_count }). These
- *     windows are how we enumerate the tables for the left nav.
- *   - The window's ``nodes`` element type is the row type; its scalar/enum
- *     fields are columns, object/list fields are relationships.
+ *     ``<Row>Connection`` object. The connection carries a flat ``nodes``
+ *     list and ``totalCount`` (alongside relay ``edges``/``pageInfo``);
+ *     these connection fields are how we enumerate the tables for the nav.
+ *   - The connection's ``nodes`` element type is the row type; its
+ *     scalar/enum fields are columns, object/list fields are relationships.
+ *   - The list field accepts ``limit``/``offset`` and an
+ *     ``order: [{ field: { <col>: ASC|DESC } }]`` argument.
  *   - Mutations ``create<Row>`` / ``update<Row>`` / ``delete<Row>`` carry
- *     the input/patch types and primary-key arguments, from which we derive
- *     creatable/updatable column sets and the PK columns.
+ *     the input/patch types (via the ``input`` / ``patch`` arguments) and
+ *     primary-key arguments, from which we derive creatable/updatable
+ *     column sets and the PK columns.
  *
  * All names are read from introspection (never hardcoded) so the code is
  * agnostic to the schema's field-casing configuration.
@@ -112,7 +117,21 @@ export interface TableMeta {
   totalCountField: string;
   limitArg: string | null;
   offsetArg: string | null;
-  orderByArg: { name: string; sdl: string } | null;
+  /**
+   * The list field's ``order`` argument, when present.
+   *
+   * The schema's order input is a list whose element nests column directions
+   * under a ``field`` sub-input, e.g. ``order: [{ field: { id: ASC } }]``.
+   * ``argName`` is the list arg, ``elementSdl`` its SDL (for the variable
+   * declaration), ``fieldKey`` the sub-input field name (usually ``field``),
+   * and ``sortableColumns`` the set of columns that sub-input accepts.
+   */
+  order: {
+    argName: string;
+    elementSdl: string;
+    fieldKey: string;
+    sortableColumns: Set<string>;
+  } | null;
   /** Scalar/enum columns (relationships excluded). */
   columns: ColumnMeta[];
   pkColumns: string[];
@@ -199,20 +218,26 @@ export function discoverSchema(result: IntrospectionResult): DataSchema {
   const tables: TableMeta[] = [];
 
   for (const field of queryType?.fields ?? []) {
-    const windowNamed = namedRef(field.type);
-    if (windowNamed.kind !== "OBJECT" || !windowNamed.name?.endsWith("PaginationWindow")) {
+    const connNamed = namedRef(field.type);
+    if (connNamed.kind !== "OBJECT" || !connNamed.name?.endsWith("Connection")) {
       continue;
     }
-    const windowType = typeMap.get(windowNamed.name);
-    if (!windowType?.fields) continue;
+    const connType = typeMap.get(connNamed.name);
+    if (!connType?.fields) continue;
 
-    // The window has exactly two fields: nodes (list of row) and total_count.
-    const nodesFieldDef = windowType.fields.find(
-      (f) => namedRef(f.type).kind === "OBJECT",
-    );
-    const totalCountFieldDef = windowType.fields.find(
-      (f) => namedRef(f.type).kind === "SCALAR",
-    );
+    // The connection exposes a flat ``nodes`` list and ``totalCount`` (plus
+    // relay ``edges``/``pageInfo``). Prefer the conventional field names, but
+    // fall back to shape: ``nodes`` is the list-of-OBJECT whose element type
+    // is not an ``*Edge``; ``totalCount`` is the scalar field.
+    const nodesFieldDef =
+      connType.fields.find((f) => f.name === "nodes") ??
+      connType.fields.find((f) => {
+        const n = namedRef(f.type);
+        return n.kind === "OBJECT" && !n.name?.endsWith("Edge");
+      });
+    const totalCountFieldDef =
+      connType.fields.find((f) => f.name === "totalCount") ??
+      connType.fields.find((f) => namedRef(f.type).kind === "SCALAR");
     if (!nodesFieldDef || !totalCountFieldDef) continue;
     const rowTypeName = namedRef(nodesFieldDef.type).name;
     if (!rowTypeName) continue;
@@ -258,13 +283,10 @@ export function discoverSchema(result: IntrospectionResult): DataSchema {
       });
     }
 
-    // Find list-field pagination args by shape (Int scalars / *OrderBy input).
+    // Pagination args by name (the backend exposes literal limit/offset).
     const limitArg = field.args.find((a) => a.name.toLowerCase() === "limit");
     const offsetArg = field.args.find((a) => a.name.toLowerCase() === "offset");
-    const orderByArgDef = field.args.find((a) => {
-      const n = namedRef(a.type);
-      return n.kind === "INPUT_OBJECT" && !!n.name?.endsWith("OrderBy");
-    });
+    const order = buildOrderMeta(typeMap, field, columns);
 
     tables.push({
       name: field.name,
@@ -275,9 +297,7 @@ export function discoverSchema(result: IntrospectionResult): DataSchema {
       totalCountField: totalCountFieldDef.name,
       limitArg: limitArg?.name ?? null,
       offsetArg: offsetArg?.name ?? null,
-      orderByArg: orderByArgDef
-        ? { name: orderByArgDef.name, sdl: typeRefToSDL(orderByArgDef.type) }
-        : null,
+      order,
       columns,
       pkColumns: [...pkNames],
       create,
@@ -292,7 +312,11 @@ export function discoverSchema(result: IntrospectionResult): DataSchema {
 
 function buildUpdateMeta(def: FieldDef | undefined): TableMeta["update"] {
   if (!def) return null;
-  const patch = def.args.find((a) => namedRef(a.type).name?.endsWith("Patch"));
+  // Detect the patch arg by name (resilient to the input type's name, which
+  // strawberry_orm derives independently); the remaining args are the PK(s).
+  const patch =
+    def.args.find((a) => a.name === "patch") ??
+    def.args.find((a) => namedRef(a.type).kind === "INPUT_OBJECT");
   if (!patch) return null;
   const pkArgs = def.args
     .filter((a) => a.name !== patch.name)
@@ -306,13 +330,60 @@ function buildUpdateMeta(def: FieldDef | undefined): TableMeta["update"] {
 
 function buildCreateMeta(def: FieldDef | undefined): TableMeta["create"] {
   if (!def) return null;
-  // The single-row create takes one INPUT_OBJECT argument named like *Input.
-  const input = def.args.find((a) => {
-    const n = namedRef(a.type);
-    return n.kind === "INPUT_OBJECT" && !!n.name?.endsWith("Input");
-  });
+  // The single-row create takes one INPUT_OBJECT argument (named ``input``).
+  const input =
+    def.args.find((a) => a.name === "input") ??
+    def.args.find((a) => namedRef(a.type).kind === "INPUT_OBJECT");
   if (!input) return null;
   return { field: def.name, inputArg: { name: input.name, sdl: typeRefToSDL(input.type) } };
+}
+
+/**
+ * Discover the list field's ``order`` argument.
+ *
+ * The schema's order input is ``[<Order>!]`` where ``<Order>`` nests column
+ * directions under a ``field`` sub-input: ``order: [{ field: { id: ASC } }]``.
+ * Returns the arg/element/sub-field names plus the set of sortable columns.
+ */
+function buildOrderMeta(
+  typeMap: Map<string, TypeDef>,
+  field: FieldDef,
+  columns: ColumnMeta[],
+): TableMeta["order"] {
+  // The order arg is a LIST whose element is an INPUT_OBJECT.
+  const arg = field.args.find((a) => {
+    const inner = a.type.kind === "NON_NULL" ? a.type.ofType : a.type;
+    return inner?.kind === "LIST" && namedRef(a.type).kind === "INPUT_OBJECT";
+  });
+  if (!arg) return null;
+  const elementName = namedRef(arg.type).name;
+  const elementDef = elementName ? typeMap.get(elementName) : undefined;
+  if (!elementDef?.inputFields?.length) return null;
+
+  // The sub-input ("field") whose own fields include our columns.
+  const columnNames = new Set(columns.map((c) => c.name));
+  let fieldKey: string | null = null;
+  let sortableColumns = new Set<string>();
+  for (const sub of elementDef.inputFields) {
+    const subNamed = namedRef(sub.type);
+    if (subNamed.kind !== "INPUT_OBJECT" || !subNamed.name) continue;
+    const subDef = typeMap.get(subNamed.name);
+    const subFieldNames = (subDef?.inputFields ?? []).map((f) => f.name);
+    const matching = subFieldNames.filter((n) => columnNames.has(n));
+    if (matching.length > 0) {
+      fieldKey = sub.name;
+      sortableColumns = new Set(matching);
+      break;
+    }
+  }
+  if (!fieldKey) return null;
+  // Element SDL without the list/non-null wrappers we re-add at call sites.
+  return {
+    argName: arg.name,
+    elementSdl: elementName ?? "Unknown",
+    fieldKey,
+    sortableColumns,
+  };
 }
 
 function buildDeleteMeta(def: FieldDef | undefined): TableMeta["remove"] {
@@ -336,12 +407,11 @@ function inputFieldNameSet(
 function discoverSortDirection(
   typeMap: Map<string, TypeDef>,
 ): { asc: string; desc: string } {
+  // Find the sort-direction enum: an ENUM with ASC- and DESC-like values.
   for (const def of typeMap.values()) {
-    if (!def.name?.endsWith("OrderBy") || !def.inputFields?.length) continue;
-    const enumName = namedRef(def.inputFields[0].type).name;
-    const values = enumName ? (typeMap.get(enumName)?.enumValues ?? []) : [];
-    const asc = values.find((v) => v.name.toLowerCase().includes("asc"))?.name;
-    const desc = values.find((v) => v.name.toLowerCase().includes("desc"))?.name;
+    if (def.kind !== "ENUM" || !def.enumValues?.length) continue;
+    const asc = def.enumValues.find((v) => v.name.toLowerCase().includes("asc"))?.name;
+    const desc = def.enumValues.find((v) => v.name.toLowerCase().includes("desc"))?.name;
     if (asc && desc) return { asc, desc };
   }
   return { asc: "ASC", desc: "DESC" };
@@ -353,11 +423,8 @@ function selectionColumns(meta: TableMeta): string {
   return meta.columns.map((c) => c.name).join(" ");
 }
 
-export interface ListVars {
-  limit: number;
-  offset: number;
-  orderBy?: Record<string, string> | null;
-}
+/** A single order entry, e.g. ``{ field: { id: ASC } }``. */
+export type OrderValue = Record<string, Record<string, string>>;
 
 export function buildListQuery(meta: TableMeta): string {
   const varDefs: string[] = [];
@@ -370,9 +437,9 @@ export function buildListQuery(meta: TableMeta): string {
     varDefs.push("$offset: Int");
     args.push(`${meta.offsetArg}: $offset`);
   }
-  if (meta.orderByArg) {
-    varDefs.push(`$orderBy: ${meta.orderByArg.sdl.replace(/!$/, "")}`);
-    args.push(`${meta.orderByArg.name}: $orderBy`);
+  if (meta.order) {
+    varDefs.push(`$order: [${meta.order.elementSdl}!]`);
+    args.push(`${meta.order.argName}: $order`);
   }
   const head = varDefs.length ? `(${varDefs.join(", ")})` : "";
   const argStr = args.length ? `(${args.join(", ")})` : "";
@@ -382,6 +449,24 @@ export function buildListQuery(meta: TableMeta): string {
     ${meta.nodesField} { __typename ${selectionColumns(meta)} }
   }
 }`;
+}
+
+/**
+ * Build the ``order`` variable value for a single-column sort.
+ *
+ * Produces the nested list shape the schema expects, e.g.
+ * ``[{ field: { id: ASC } }]``. Returns ``null`` when the table has no order
+ * argument or the column isn't sortable.
+ */
+export function buildOrderValue(
+  meta: TableMeta,
+  columnName: string,
+  desc: boolean,
+  sortAsc: string,
+  sortDesc: string,
+): OrderValue[] | null {
+  if (!meta.order || !meta.order.sortableColumns.has(columnName)) return null;
+  return [{ [meta.order.fieldKey]: { [columnName]: desc ? sortDesc : sortAsc } }];
 }
 
 export function buildUpdateMutation(meta: TableMeta): string | null {

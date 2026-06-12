@@ -10,7 +10,7 @@ const queryClient = new QueryClient({
 
 /**
  * Layout for the data-editing feature: a left nav listing every database
- * table (discovered from the ``*PaginationWindow`` query fields) and an
+ * table (discovered from the ``*Connection`` query fields) and an
  * ``<Outlet/>`` rendering the selected table's grid.
  */
 export function DataLayout() {

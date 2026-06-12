@@ -16,6 +16,7 @@ import {
   buildCreateMutation,
   buildDeleteMutation,
   buildListQuery,
+  buildOrderValue,
   buildUpdateMutation,
   coerceValue,
   formatValue,
@@ -77,11 +78,13 @@ function TableView({
   const createMutationStr = useMemo(() => buildCreateMutation(meta), [meta]);
   const deleteMutationStr = useMemo(() => buildDeleteMutation(meta), [meta]);
 
-  const orderBy = useMemo(() => {
+  // Single-column server-side sort, shaped to the schema's nested order input
+  // (``[{ field: { col: ASC|DESC } }]``).
+  const order = useMemo(() => {
     const sort = sorting[0];
     if (!sort) return null;
-    return { [sort.id]: sort.desc ? sortDesc : sortAsc };
-  }, [sorting, sortAsc, sortDesc]);
+    return buildOrderValue(meta, sort.id, sort.desc, sortAsc, sortDesc);
+  }, [meta, sorting, sortAsc, sortDesc]);
 
   const rowsKey = [
     "data",
@@ -89,7 +92,7 @@ function TableView({
     meta.name,
     pagination.pageIndex,
     pagination.pageSize,
-    orderBy,
+    order,
   ] as const;
 
   const { data, isFetching, error } = useQuery({
@@ -100,7 +103,7 @@ function TableView({
         {
           limit: pagination.pageSize,
           offset: pagination.pageIndex * pagination.pageSize,
-          orderBy,
+          order,
         },
       );
       const window = result[meta.listField] as {
@@ -196,7 +199,7 @@ function TableView({
       id: col.name,
       accessorKey: col.name,
       header: humanizeColumn(col.name) + (col.isPk ? " 🔑" : ""),
-      enableSorting: true,
+      enableSorting: meta.order?.sortableColumns.has(col.name) ?? false,
       cell: (info) => {
         const editable = canWrite && col.updatable && !col.isPk;
         if (!editable) {
@@ -289,11 +292,12 @@ function TableView({
               <tr key={hg.id}>
                 {hg.headers.map((header) => {
                   const sorted = header.column.getIsSorted();
+                  const canSort = header.column.getCanSort();
                   return (
                     <th
                       key={header.id}
-                      onClick={header.column.getToggleSortingHandler()}
-                      className="cursor-pointer select-none whitespace-nowrap border-b border-zinc-200 px-3 py-2 text-left font-semibold text-zinc-600 dark:border-zinc-800 dark:text-zinc-300"
+                      onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
+                      className={`select-none whitespace-nowrap border-b border-zinc-200 px-3 py-2 text-left font-semibold text-zinc-600 dark:border-zinc-800 dark:text-zinc-300 ${canSort ? "cursor-pointer" : ""}`}
                     >
                       {flexRender(header.column.columnDef.header, header.getContext())}
                       {sorted === "asc" && " ▲"}
