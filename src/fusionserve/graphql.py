@@ -41,7 +41,7 @@ import litestar.datastructures
 import strawberry
 from litestar import Request
 from pydantic.alias_generators import to_pascal
-from sqlalchemy import delete, event, insert, select, text, update
+from sqlalchemy import delete, event, insert, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from strawberry.annotation import StrawberryAnnotation
 from strawberry.extensions import QueryDepthLimiter
@@ -530,6 +530,7 @@ def _attach_mutations(mutation_cls: type, orm: StrawberryORM, orm_class: type, g
     # the create input must then *include* the PK columns (otherwise it's empty
     # and GraphQL rejects it), and there is nothing to patch, so update
     # mutations are skipped.
+    # TODO: this never fires since automap ignores pure join tables.
     has_non_pk = any(col.name not in pks for col in table.columns)
     input_type = orm.input(orm_class) if has_non_pk else orm.input(orm_class, exclude_pk=False)
     where_type = orm.backend._filter_registry.get(orm_class)
@@ -672,3 +673,128 @@ def _attach_mutations(mutation_cls: type, orm: StrawberryORM, orm_class: type, g
         delete_many,
         [StrawberryArgument("where", None, StrawberryAnnotation(where_type))],
     )
+
+    # ---- Many-to-many link/unlink mutations (one set per association side). ----
+    for rel in orm_class.__mapper__.relationships:
+        if rel.secondary is not None:
+            _attach_m2m_mutations(mutation_cls, orm_class, gql_type, rel)
+
+
+def _split_assoc_pair(pair, secondary) -> tuple:
+    """Split a relationship sync pair into ``(entity_column, secondary_column)``.
+
+    The pair members come in an unspecified order; classify them by which one
+    belongs to the association (``secondary``) table.
+    """
+    left, right = pair
+    return (left, right) if right.table is secondary else (right, left)
+
+
+def _attach_m2m_mutations(mutation_cls: type, orm_class: type, gql_type: type, rel) -> None:
+    """Attach plural link/unlink mutations for one side of a many-to-many relation.
+
+    automap skips the pure association table, exposing only ``secondary``-based
+    relationships. For each side we generate two mutations (no singular, no
+    update) operating directly on the association table:
+
+    * ``create<LocalSingular><TargetPlural>(inputs: [<Local><Target>Link!]!)``
+    * ``delete<LocalSingular><TargetPlural>(inputs: [<Local><Target>Link!]!)``
+
+    Each runs a single statement (``INSERT``/``DELETE … RETURNING`` wrapped in a
+    CTE joined back to the local table) so the role-scoped session returns the
+    affected **local** entities without an extra round-trip. Semantics are
+    strict: linking an existing pair errors (PK violation, atomic); unlinking is
+    rejected unless every requested pair existed.
+    """
+    secondary = rel.secondary
+    target_orm = rel.mapper.class_
+    # Restrict to single-column joins on each side (the normal M2M shape).
+    if len(rel.synchronize_pairs) != 1 or len(rel.secondary_synchronize_pairs) != 1:
+        _logger.warning(
+            "Skipping M2M mutations for %s.%s: multi-column association joins are unsupported.",
+            orm_class.__table__.name,
+            rel.key,
+        )
+        return
+
+    local_pk_col, sec_local_col = _split_assoc_pair(rel.synchronize_pairs[0], secondary)
+    _target_pk_col, sec_target_col = _split_assoc_pair(rel.secondary_synchronize_pairs[0], secondary)
+    local_pk_attr = getattr(orm_class, local_pk_col.name)
+
+    local_singular = _gql_type_name(orm_class)
+    target_plural = to_pascal(target_orm.__table__.name)
+    link_name = f"{local_singular}{_gql_type_name(target_orm)}Link"
+
+    link_input = strawberry.input(
+        type(
+            link_name,
+            (),
+            {
+                "__annotations__": {
+                    sec_local_col.name: sec_local_col.type.python_type,
+                    sec_target_col.name: sec_target_col.type.python_type,
+                }
+            },
+        )
+    )
+
+    def _rows(inputs: list) -> list[dict]:
+        return [
+            {
+                sec_local_col.name: getattr(item, sec_local_col.name),
+                sec_target_col.name: getattr(item, sec_target_col.name),
+            }
+            for item in inputs
+        ]
+
+    def _locals_from_cte(cte) -> Any:
+        return select(orm_class).join(cte, local_pk_attr == cte.c[sec_local_col.name])
+
+    def _dedupe(rows: list) -> list:
+        seen: dict[Any, Any] = {}
+        for row in rows:
+            seen.setdefault(getattr(row, local_pk_col.name), row)
+        return list(seen.values())
+
+    async def create_resolver(info: strawberry.Info, inputs: Any) -> list[gql_type]:  # type: ignore[valid-type]
+        if not inputs:
+            raise ValueError("inputs must contain at least one link to create")
+        session = info.context.session
+        cte = insert(secondary).values(_rows(inputs)).returning(sec_local_col).cte("linked")
+        rows = (await session.execute(_locals_from_cte(cte))).scalars().all()
+        await session.commit()
+        return _dedupe(list(rows))
+
+    async def delete_resolver(info: strawberry.Info, inputs: Any) -> list[gql_type]:  # type: ignore[valid-type]
+        if not inputs:
+            raise ValueError("inputs must contain at least one link to delete")
+        pairs = [(getattr(i, sec_local_col.name), getattr(i, sec_target_col.name)) for i in inputs]
+        session = info.context.session
+        cte = (
+            delete(secondary)
+            .where(tuple_(sec_local_col, sec_target_col).in_(pairs))
+            .returning(sec_local_col)
+            .execution_options(synchronize_session=None)
+            .cte("unlinked")
+        )
+        rows = list((await session.execute(_locals_from_cte(cte))).scalars().all())
+        if len(rows) != len(pairs):
+            await session.rollback()
+            raise RecordNotFoundError(f"one or more {link_name} pairs do not exist")
+        await session.commit()
+        return _dedupe(rows)
+
+    many_local = StrawberryAnnotation(list[gql_type])
+    create_links = strawberry.mutation(
+        resolver=create_resolver, description=f"Link {local_singular} to {target_plural} (many-to-many)."
+    )
+    create_links.type_annotation = many_local
+    setattr(mutation_cls, f"create{local_singular}{target_plural}", create_links)
+    _set_resolver_arguments(create_links, [StrawberryArgument("inputs", None, StrawberryAnnotation(list[link_input]))])
+
+    delete_links = strawberry.mutation(
+        resolver=delete_resolver, description=f"Unlink {local_singular} from {target_plural} (many-to-many)."
+    )
+    delete_links.type_annotation = many_local
+    setattr(mutation_cls, f"delete{local_singular}{target_plural}", delete_links)
+    _set_resolver_arguments(delete_links, [StrawberryArgument("inputs", None, StrawberryAnnotation(list[link_input]))])
