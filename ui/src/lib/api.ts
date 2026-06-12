@@ -1,23 +1,79 @@
-// Static URL constants for the FusionServe backend endpoints the SPA
-// embeds via iframes. All URLs live under ``settings.base_path``
-// (``/api``) on the Python side and are auto-registered by Litestar's
-// OpenAPI router (Swagger / Scalar render plugins) or the dynamic
-// GraphQL controller built during the app lifespan.
+// Runtime configuration utilities.
+//
+// The backend exposes a client-configuration document at
+// ``/.well-known/configuration`` (also served at ``<base_path>/config.json``).
+// The SPA fetches it lazily — only when something first needs the backend —
+// and derives every REST/GraphQL endpoint from the returned ``base_path``,
+// so the UI never hardcodes URLs and follows a relocated backend.
 
-/** Public URL of the raw OpenAPI 3.1 specification document. */
-export const OPENAPI_URL = "/api/openapi.json";
+/** Base-path-independent client configuration endpoint. */
+export const WELLKNOWN_CONFIG_URL = "/.well-known/configuration";
 
-/** Public URL of the backend-served Swagger UI viewer. */
-export const SWAGGER_URL = "/api/swagger";
+/** Fallback base path used when the backend can't be reached. */
+export const DEFAULT_BASE_PATH = "/api";
 
-/** Public URL of the GraphQL endpoint (also serves GraphiQL on GET). */
-export const GRAPHQL_URL = "/api/graphql";
+/** Raw payload returned by the configuration endpoint (snake_case). */
+interface RawConfig {
+  base_path?: string | null;
+  jwt_issuer?: string | null;
+  jwks_url?: string | null;
+  client_id?: string | null;
+}
+
+/** Resolved runtime configuration with derived endpoint URLs. */
+export interface RuntimeConfig {
+  /** Backend API base path (e.g. ``/api``). */
+  basePath: string;
+  /** GraphQL endpoint URL. */
+  graphqlUrl: string;
+  /** Raw OpenAPI 3.1 document URL. */
+  openapiUrl: string;
+  /** Backend-served Swagger UI URL. */
+  swaggerUrl: string;
+  /** OIDC issuer, when authentication is configured. */
+  jwtIssuer: string | null;
+  /** Public OIDC client id, when authentication is configured. */
+  clientId: string | null;
+}
+
+/** Compose the runtime config (derived endpoints) from a raw payload. */
+export function deriveConfig(raw: RawConfig): RuntimeConfig {
+  const basePath = (raw.base_path || DEFAULT_BASE_PATH).replace(/\/+$/, "");
+  return {
+    basePath,
+    graphqlUrl: `${basePath}/graphql`,
+    openapiUrl: `${basePath}/openapi.json`,
+    swaggerUrl: `${basePath}/swagger`,
+    jwtIssuer: raw.jwt_issuer ?? null,
+    clientId: raw.client_id ?? null,
+  };
+}
+
+let configPromise: Promise<RuntimeConfig> | null = null;
 
 /**
- * Public URL of the backend client-configuration document.
+ * Fetch and cache the runtime configuration.
  *
- * Returns a subset of server settings consumed by the SPA — notably
- * ``jwt_issuer`` (the OIDC issuer used for ``.well-known`` discovery) and
- * the public ``client_id`` for the Authorization Code + PKCE flow.
+ * Memoized for the page lifetime: concurrent and repeat callers share one
+ * network request. If the endpoint is unreachable or returns an error, the
+ * promise resolves to a fallback derived from {@link DEFAULT_BASE_PATH} so
+ * the app keeps working (auth simply stays unavailable).
  */
-export const CONFIG_URL = "/api/config.json";
+export function fetchRuntimeConfig(): Promise<RuntimeConfig> {
+  if (!configPromise) {
+    configPromise = (async () => {
+      try {
+        const resp = await fetch(WELLKNOWN_CONFIG_URL, {
+          headers: { Accept: "application/json" },
+        });
+        if (!resp.ok) {
+          throw new Error(`configuration endpoint responded ${resp.status}`);
+        }
+        return deriveConfig((await resp.json()) as RawConfig);
+      } catch {
+        return deriveConfig({});
+      }
+    })();
+  }
+  return configPromise;
+}

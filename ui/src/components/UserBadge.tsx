@@ -12,8 +12,7 @@ import { useAuth } from "@/lib/auth";
  *   opens a menu with the user's email, "Copy access token" and "Sign out".
  */
 export function UserBadge() {
-  const { status, user, configured, login, logout, copyAccessToken } =
-    useAuth();
+  const { status, user, error, login, logout, copyAccessToken } = useAuth();
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -47,21 +46,17 @@ export function UserBadge() {
     );
   }
 
-  // Anonymous (or auth not configured / errored): click to log in.
+  // Anonymous (or errored): click to log in. Login is enabled optimistically
+  // — config is loaded on click; if the backend has no OIDC issuer, the auth
+  // context surfaces an error which we show as the button tooltip.
   if (status !== "authenticated" || !user) {
-    const disabled = !configured;
     return (
       <button
         type="button"
         onClick={login}
-        disabled={disabled}
-        title={
-          disabled
-            ? "Authentication is not configured on this server"
-            : "Sign in"
-        }
-        aria-label={disabled ? "Authentication unavailable" : "Sign in"}
-        className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50 hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 dark:hover:text-zinc-50"
+        title={error ?? "Sign in"}
+        aria-label="Sign in"
+        className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50 hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 dark:hover:text-zinc-50"
       >
         <span className="flex h-6 w-6 items-center justify-center rounded-full bg-zinc-200 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-300">
           <UserIcon />

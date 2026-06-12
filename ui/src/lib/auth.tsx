@@ -15,7 +15,8 @@ import {
   WebStorageStateStore,
 } from "oidc-client-ts";
 
-import { CONFIG_URL } from "./api";
+import type { RuntimeConfig } from "./api";
+import { useRuntimeConfig } from "./runtimeConfig";
 
 /**
  * OpenID Connect (Authorization Code + PKCE) authentication.
@@ -26,8 +27,12 @@ import { CONFIG_URL } from "./api";
  * redirect callback if the IdP just sent us back, or (b) silently restore a
  * still-valid stored session — neither of which initiates authentication.
  *
- * Configuration (issuer + public client id) comes from the backend
- * ``/api/config.json``; endpoint discovery is delegated to oidc-client-ts,
+ * Configuration (issuer + public client id) comes from the lazily-loaded
+ * runtime config ({@link useRuntimeConfig}); the backend itself only serves a
+ * subset of settings. To avoid a backend call on pages that don't need it,
+ * config is fetched at first need: on mount only when there's a login
+ * callback to complete or a stored session to restore, and otherwise on the
+ * first login click. Endpoint discovery is delegated to oidc-client-ts,
  * which fetches ``<issuer>/.well-known/openid-configuration``.
  */
 
@@ -76,12 +81,6 @@ const AuthContext = createContext<AuthContextValue | null>(null);
  */
 let redirectExchange: Promise<OidcUser> | null = null;
 
-/** Backend client-configuration payload (subset of server settings). */
-interface ClientConfig {
-  jwt_issuer?: string | null;
-  client_id?: string | null;
-}
-
 function str(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
@@ -120,6 +119,7 @@ function toAuthUser(user: OidcUser): AuthUser {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const { ensureConfig } = useRuntimeConfig();
   const managerRef = useRef<UserManager | null>(null);
   const accessTokenRef = useRef<string | null>(null);
   const [status, setStatus] = useState<AuthStatus>("anonymous");
@@ -140,37 +140,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStatus("anonymous");
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function bootstrap() {
-      let cfg: ClientConfig;
-      try {
-        const resp = await fetch(CONFIG_URL, {
-          headers: { Accept: "application/json" },
-        });
-        if (!resp.ok) {
-          throw new Error(`config.json responded ${resp.status}`);
-        }
-        cfg = (await resp.json()) as ClientConfig;
-      } catch {
-        // Without configuration we can't authenticate; stay anonymous and
-        // leave login disabled (configured = false).
-        return;
-      }
-
-      if (!cfg.jwt_issuer || !cfg.client_id) {
-        // Auth is not enabled on this backend.
-        return;
-      }
-
-      // Stable static mount of the SPA (hash route lives in the fragment,
+  // Build (once) the UserManager from resolved config. Returns null when the
+  // backend has no OIDC configuration (no issuer / client id).
+  const buildManager = useCallback(
+    (cfg: RuntimeConfig): UserManager | null => {
+      if (managerRef.current) return managerRef.current;
+      if (!cfg.jwtIssuer || !cfg.clientId) return null;
+      // Stable static mount of the SPA (the hash route lives in the fragment,
       // which the IdP preserves separately). Must be a registered redirect
       // URI on the IdP client.
       const appUrl = window.location.origin + window.location.pathname;
       const settings: UserManagerSettings = {
-        authority: cfg.jwt_issuer,
-        client_id: cfg.client_id,
+        authority: cfg.jwtIssuer,
+        client_id: cfg.clientId,
         redirect_uri: appUrl,
         post_logout_redirect_uri: appUrl,
         response_type: "code",
@@ -182,24 +164,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         userStore: new WebStorageStateStore({ store: window.sessionStorage }),
         stateStore: new WebStorageStateStore({ store: window.sessionStorage }),
       };
-
       const manager = new UserManager(settings);
-      managerRef.current = manager;
-      if (!cancelled) {
-        setConfigured(true);
-      }
-
       // Renewal / external updates keep the token + badge in sync.
-      manager.events.addUserLoaded((u) => {
-        if (!cancelled) applyUser(u);
-      });
-      manager.events.addUserUnloaded(() => {
-        if (!cancelled) clearUser();
-      });
+      manager.events.addUserLoaded((u) => applyUser(u));
+      manager.events.addUserUnloaded(() => clearUser());
+      managerRef.current = manager;
+      setConfigured(true);
+      return manager;
+    },
+    [applyUser, clearUser],
+  );
+
+  // On mount, only touch the backend when there's a login callback to
+  // complete or a stored session to restore. Pages that never authenticate
+  // (e.g. Overview) make no request.
+  useEffect(() => {
+    let cancelled = false;
+    const query = new URLSearchParams(window.location.search);
+    const hasCallback = query.has("code") && query.has("state");
+    const hasStoredSession = (() => {
+      try {
+        for (let i = 0; i < window.sessionStorage.length; i += 1) {
+          if (window.sessionStorage.key(i)?.startsWith("oidc.user:")) return true;
+        }
+      } catch {
+        /* sessionStorage unavailable */
+      }
+      return false;
+    })();
+    if (!hasCallback && !hasStoredSession) return;
+
+    async function bootstrap() {
+      const cfg = await ensureConfig();
+      if (cancelled) return;
+      const manager = buildManager(cfg);
+      if (!manager) return;
+      const appUrl = window.location.origin + window.location.pathname;
 
       // 1. Complete a redirect callback if the IdP just returned to us.
-      const query = new URLSearchParams(window.location.search);
-      if (query.has("code") && query.has("state")) {
+      if (hasCallback) {
         setStatus("authenticating");
         try {
           if (!redirectExchange) {
@@ -242,19 +245,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [applyUser, clearUser]);
+  }, [ensureConfig, buildManager, applyUser, clearUser]);
 
   const login = useCallback(() => {
-    const manager = managerRef.current;
-    if (!manager) return;
     setStatus("authenticating");
     setError(null);
-    // Preserve the current SPA (hash) route so we can return to it.
-    manager.signinRedirect({ state: window.location.hash }).catch((e) => {
-      setStatus("error");
-      setError(e instanceof Error ? e.message : String(e));
-    });
-  }, []);
+    // Lazily load config on first login, then build the manager and redirect.
+    ensureConfig()
+      .then((cfg) => {
+        const manager = buildManager(cfg);
+        if (!manager) {
+          setStatus("error");
+          setError("Authentication is not configured on this server.");
+          return;
+        }
+        // Preserve the current SPA (hash) route so we can return to it.
+        return manager.signinRedirect({ state: window.location.hash });
+      })
+      .catch((e) => {
+        setStatus("error");
+        setError(e instanceof Error ? e.message : String(e));
+      });
+  }, [ensureConfig, buildManager]);
 
   const logout = useCallback(() => {
     const manager = managerRef.current;

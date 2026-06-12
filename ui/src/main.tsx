@@ -8,6 +8,7 @@ import {
 
 import "./styles.css";
 import { AuthProvider } from "./lib/auth";
+import { RuntimeConfigProvider } from "./lib/runtimeConfig";
 import { routeTree } from "./routes";
 
 const router = createRouter({
@@ -29,8 +30,10 @@ if (rootElement === null) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <AuthProvider>
-      <RouterProvider router={router} />
-    </AuthProvider>
+    <RuntimeConfigProvider>
+      <AuthProvider>
+        <RouterProvider router={router} />
+      </AuthProvider>
+    </RuntimeConfigProvider>
   </StrictMode>,
 );

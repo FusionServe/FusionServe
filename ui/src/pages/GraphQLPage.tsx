@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { GraphiQL, HISTORY_PLUGIN } from "graphiql";
 import { createGraphiQLFetcher } from "@graphiql/toolkit";
 import { explorerPlugin } from "@graphiql/plugin-explorer";
@@ -14,23 +14,39 @@ import "@/lib/monaco-workers";
 import "graphiql/style.css";
 import "@graphiql/plugin-explorer/style.css";
 
-import { GRAPHQL_URL } from "@/lib/api";
+import { useRuntimeConfig } from "@/lib/runtimeConfig";
 import { useTheme } from "@/lib/theme";
 
 // GraphiQL is now bundled directly (replacing the previous iframe to the
-// backend-served IDE). Queries go to the same ``/api/graphql`` endpoint
+// backend-served IDE). Queries go to the runtime-configured GraphQL endpoint
 // over POST; in dev Vite proxies that to the Litestar backend. The
 // backend still serves its own GraphiQL on GET as a fallback, but the
 // SPA no longer depends on it.
 export function GraphQLPage() {
   const { resolvedTheme } = useTheme();
+  const { config, ensureConfig } = useRuntimeConfig();
+
+  // Lazily resolve the backend config (and thus the GraphQL URL) on mount.
+  useEffect(() => {
+    void ensureConfig();
+  }, [ensureConfig]);
+
+  const graphqlUrl = config?.graphqlUrl;
   const fetcher = useMemo(
-    () => createGraphiQLFetcher({ url: GRAPHQL_URL }),
-    [],
+    () => (graphqlUrl ? createGraphiQLFetcher({ url: graphqlUrl }) : null),
+    [graphqlUrl],
   );
   // Visual query-builder panel, matching the explorer that Strawberry's
   // backend-served GraphiQL shipped. Stable instance across renders.
   const explorer = useMemo(() => explorerPlugin(), []);
+
+  if (!fetcher) {
+    return (
+      <div className="flex h-[calc(100vh-9rem)] items-center justify-center text-sm text-zinc-500 dark:text-zinc-400">
+        Loading…
+      </div>
+    );
+  }
 
   return (
     <div className="h-[calc(100vh-9rem)] overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">

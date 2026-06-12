@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 
-import { GRAPHQL_URL } from "./api";
 import { useAuth } from "./auth";
+import { useRuntimeConfig } from "./runtimeConfig";
 
 /** A GraphQL error returned in the ``errors`` array of a response. */
 export interface GraphQLError {
@@ -28,16 +28,17 @@ interface GraphQLResponse<T> {
 /**
  * Execute a GraphQL operation against the backend.
  *
- * Sends a POST to {@link GRAPHQL_URL} (proxied to the Litestar backend in
- * dev). When ``token`` is provided it is sent as a Bearer credential so
- * PostgreSQL row-level security applies the authenticated role; otherwise
- * the request runs as the anonymous role.
+ * Sends a POST to ``url`` (the runtime-configured GraphQL endpoint, proxied
+ * to the Litestar backend in dev). When ``token`` is provided it is sent as
+ * a Bearer credential so PostgreSQL row-level security applies the
+ * authenticated role; otherwise the request runs as the anonymous role.
  *
  * @throws {GraphQLRequestError} if the response contains a non-empty
  *   ``errors`` array.
  * @throws {Error} on transport/HTTP failures.
  */
 export async function gqlRequest<T>(
+  url: string,
   query: string,
   variables?: Record<string, unknown>,
   token?: string | null,
@@ -49,7 +50,7 @@ export async function gqlRequest<T>(
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
-  const resp = await fetch(GRAPHQL_URL, {
+  const resp = await fetch(url, {
     method: "POST",
     headers,
     body: JSON.stringify({ query, variables }),
@@ -68,10 +69,12 @@ export async function gqlRequest<T>(
 }
 
 /**
- * Hook returning a {@link gqlRequest} bound to the current access token.
+ * Hook returning a {@link gqlRequest} bound to the runtime GraphQL URL and
+ * the current access token.
  *
- * The returned function is stable across renders but always reads the
- * latest token via the auth context's ``getAccessToken`` getter, so
+ * The returned function lazily resolves the runtime config on first call
+ * (so it works without a config fetch until a query actually runs) and reads
+ * the latest token via the auth context's ``getAccessToken`` getter, so
  * silent token renewal is picked up transparently.
  */
 export function useGql(): <T>(
@@ -79,9 +82,12 @@ export function useGql(): <T>(
   variables?: Record<string, unknown>,
 ) => Promise<T> {
   const { getAccessToken } = useAuth();
+  const { ensureConfig } = useRuntimeConfig();
   return useCallback(
-    <T>(query: string, variables?: Record<string, unknown>) =>
-      gqlRequest<T>(query, variables, getAccessToken()),
-    [getAccessToken],
+    async <T>(query: string, variables?: Record<string, unknown>) => {
+      const cfg = await ensureConfig();
+      return gqlRequest<T>(cfg.graphqlUrl, query, variables, getAccessToken());
+    },
+    [ensureConfig, getAccessToken],
   );
 }

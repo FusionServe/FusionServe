@@ -102,12 +102,16 @@ class ConfigDTO(PydanticDTO[Settings]):
             "jwt_issuer",
             "jwks_url",
             "client_id",
+            "base_path",
         }
     )
 
 
-@get(f"{settings.base_path.rstrip('/')}/config.json", dto=ConfigDTO)
+@get(
+    ["/.well-known/config.json", "/.well-known/configuration", f"{settings.base_path.rstrip('/')}/config.json"],
+    dto=ConfigDTO,
+)
 async def get_config() -> Settings:
     """Expose a subset of the server configuration to the client.
-    This is consumed by the client apps to configure the itself."""
+    This is consumed by the web app to configure itself."""
     return settings

@@ -58,8 +58,11 @@ export default defineConfig(({ command }) => ({
     // under ``/api`` covers OpenAPI surfaces (Swagger, Scalar, the raw
     // JSON document), the REST CRUD endpoints, and the GraphQL endpoint
     // — all reachable transparently from the SPA during development.
+    // ``/.well-known`` is forwarded too: the client-configuration document
+    // (``/.well-known/configuration``) lives outside ``base_path``.
     proxy: {
       "/api": { target: "http://localhost:8001", changeOrigin: true },
+      "/.well-known": { target: "http://localhost:8001", changeOrigin: true },
     },
   },
   build: {
