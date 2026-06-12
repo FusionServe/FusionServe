@@ -289,6 +289,7 @@ The full parity migration was executed on this branch as seven workstreams:
 - **WS6** — contain + pin the private `_filter_registry`/`_order_registry` access (#8). ✅
 - **WS7** — remove `strawberry-sqlalchemy-mapper`; update `docs/features/graphql_api.md` + this spec. ✅
 - **WS8** — replace relay connections with the custom `fusionserve.connections` module (composite-PK support, native PK columns, cursor[keyset]+limit/offset pagination, `edges`+`nodes` shapes); resolves #13. ✅
+- **WS9** — many-to-many link/unlink mutations: for each side of an automap `secondary` relation, two plural strict mutations (`create<Local><TargetPlural>` / `delete<Local><TargetPlural>`) operating on the association table via single `RETURNING` statements. ✅
 
 Coverage: 22 integration tests (testcontainers PG) + 3 no-DB contract tests, all green.
 

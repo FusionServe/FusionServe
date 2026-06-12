@@ -124,6 +124,20 @@ def postgres_container():
                         """
                     )
                 )
+                # Pure association table -> automap exposes a many-to-many
+                # (Book.categories / Category.books) and skips the table itself.
+                conn.execute(text(f'CREATE TABLE "{schema}".categories (id serial PRIMARY KEY, name text NOT NULL)'))
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE TABLE "{schema}".book_categories (
+                            book_id integer NOT NULL REFERENCES "{schema}".books(id),
+                            category_id integer NOT NULL REFERENCES "{schema}".categories(id),
+                            PRIMARY KEY (book_id, category_id)
+                        );
+                        """
+                    )
+                )
                 conn.execute(
                     text(
                         f"""
@@ -172,8 +186,8 @@ Joined view of books and their author names.';
                 )
                 conn.execute(
                     text(
-                        f'GRANT SELECT ON "{schema}".authors, "{schema}".books, '
-                        f'"{schema}".book_tags, "{schema}".book_summaries TO app_anon'
+                        f'GRANT SELECT ON "{schema}".authors, "{schema}".books, "{schema}".book_tags, '
+                        f'"{schema}".categories, "{schema}".book_categories, "{schema}".book_summaries TO app_anon'
                     )
                 )
                 # RLS on books: anon sees only public rows; app_author sees all.
@@ -210,6 +224,10 @@ Joined view of books and their author names.';
                         """
                     )
                 )
+                conn.execute(
+                    text(f"""INSERT INTO "{schema}".categories (id, name) VALUES (1, 'sci-fi'), (2, 'drama')""")
+                )
+                conn.execute(text(f"SELECT setval(pg_get_serial_sequence('\"{schema}\".categories', 'id'), 2, true)"))
                 conn.execute(text(f"SELECT setval(pg_get_serial_sequence('\"{schema}\".authors', 'id'), 2, true)"))
         finally:
             engine.dispose()
@@ -609,6 +627,76 @@ def test_mutation_update_by_pk(graphql_client):
         assert body["data"]["updateAuthor"]["name"] == "Renamed"
     finally:
         graphql_client(f"mutation {{ deleteAuthor(id: {raw}) {{ name }} }}", token="alice-token")
+
+
+def test_m2m_link_and_unlink(graphql_client):
+    """Plural M2M link/unlink mutations operate on the association table.
+
+    automap exposes Book.categories / Category.books and skips book_categories;
+    createBookCategories/deleteBookCategories link/unlink and return the local
+    (Book) entities.
+    """
+    # A single-element list covers the "one pair" case.
+    body = graphql_client(
+        "mutation { createBookCategories(inputs: [{ bookId: 1, categoryId: 1 }]) { id title } }",
+        token="alice-token",
+    )
+    assert "errors" not in body, body
+    assert body["data"]["createBookCategories"][0]["id"] == 1
+
+    # Link is visible through the many-to-many relation field.
+    view = graphql_client(
+        "{ books(filter: { field: { id: { exact: 1 } } }) { nodes { categories { name } } } }",
+        token="alice-token",
+    )
+    cats = {c["name"] for c in view["data"]["books"]["nodes"][0]["categories"]}
+    assert "sci-fi" in cats
+
+    # Unlink.
+    body = graphql_client(
+        "mutation { deleteBookCategories(inputs: [{ bookId: 1, categoryId: 1 }]) { id } }",
+        token="alice-token",
+    )
+    assert "errors" not in body, body
+    assert body["data"]["deleteBookCategories"][0]["id"] == 1
+
+
+def test_m2m_reverse_side_and_dedup(graphql_client):
+    """The reverse side (createCategoryBooks) exists; multi-pair create dedupes locals."""
+    body = graphql_client(
+        "mutation { createCategoryBooks(inputs: [{ categoryId: 2, bookId: 1 }, { categoryId: 2, bookId: 3 }]) "
+        "  { id name } }",
+        token="alice-token",
+    )
+    assert "errors" not in body, body
+    # Both pairs share category 2 -> one deduped local Category returned.
+    rows = body["data"]["createCategoryBooks"]
+    assert [r["id"] for r in rows] == [2]
+    graphql_client(
+        "mutation { deleteCategoryBooks(inputs: [{ categoryId: 2, bookId: 1 }, { categoryId: 2, bookId: 3 }]) { id } }",
+        token="alice-token",
+    )
+
+
+def test_m2m_strict_create_and_delete(graphql_client):
+    """Strict semantics: duplicate link errors; unlinking a missing pair errors."""
+    graphql_client(
+        "mutation { createBookCategories(inputs: [{ bookId: 3, categoryId: 1 }]) { id } }", token="alice-token"
+    )
+    try:
+        dup = graphql_client(
+            "mutation { createBookCategories(inputs: [{ bookId: 3, categoryId: 1 }]) { id } }", token="alice-token"
+        )
+        assert "errors" in dup, dup  # duplicate link rejected
+        missing = graphql_client(
+            "mutation { deleteBookCategories(inputs: [{ bookId: 3, categoryId: 2 }]) { id } }", token="alice-token"
+        )
+        assert "errors" in missing, missing  # unlinking absent pair rejected
+        assert "do not exist" in missing["errors"][0]["message"]
+    finally:
+        graphql_client(
+            "mutation { deleteBookCategories(inputs: [{ bookId: 3, categoryId: 1 }]) { id } }", token="alice-token"
+        )
 
 
 def test_mutation_update_many_empty_where_guardrail(graphql_client):
