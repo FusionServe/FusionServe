@@ -93,6 +93,24 @@ For every non-view table, six CRUD mutations are generated (RETURNING-based, sin
 
 `update<Plural>`/`delete<Plural>` reject an empty/`None`-resolving `where` to block accidental table-wide writes.
 
+### Many-to-many link/unlink
+
+automap collapses a pure association table into `secondary`-based relationships
+on both sides (and skips the table itself). For **each side** of every
+many-to-many relation, two plural mutations manage the association rows (no
+singular, no update):
+
+- `create<LocalSingular><TargetPlural>(inputs: [<Local><Target>Link!]!)`
+- `delete<LocalSingular><TargetPlural>(inputs: [<Local><Target>Link!]!)`
+
+e.g. `createUserProjects` / `deleteUserProjects` (and the reverse
+`createProjectUsers` / `deleteProjectUsers`), where `<Local><Target>Link`
+carries the two foreign-key columns (`{ userId, projectId }`). Each is a single
+`INSERT`/`DELETE … RETURNING` statement returning the affected **local**
+entities. Semantics are strict: linking an existing pair errors (atomic);
+unlinking errors unless every requested pair existed. A one-element `inputs`
+list covers the single-pair case.
+
 > Mutation payloads should select scalar columns; selecting a nested relation on a mutation result is not currently supported (async lazy-load).
 
 ---
