@@ -106,6 +106,55 @@ interface ArgMeta {
   sdl: string;
 }
 
+/** The "shape" of value a filter operator expects. */
+export type FilterValueKind = "scalar" | "list" | "boolean" | "range";
+
+export interface OperatorMeta {
+  /** GraphQL operator field name, e.g. "exact", "iContains", "isNull". */
+  name: string;
+  valueKind: FilterValueKind;
+  /** Named scalar type the operator's value(s) coerce to, e.g. "Int", "String". */
+  scalarType: string;
+}
+
+export interface FilterColumnMeta {
+  /** Column (row-type field) name. */
+  name: string;
+  operators: OperatorMeta[];
+}
+
+/**
+ * Cursor (keyset) pagination metadata for a table's list field.
+ *
+ * The connection field accepts ``first``/``after`` and exposes ``pageInfo``
+ * with ``hasNextPage``/``endCursor``; together they drive infinite scroll
+ * (``useInfiniteQuery``) with a stable PK tiebreaker applied server-side.
+ */
+export interface CursorMeta {
+  firstArg: string;
+  afterArg: string;
+  pageInfoField: string;
+  hasNextPageField: string;
+  endCursorField: string;
+}
+
+/**
+ * Filter metadata for a table's list field.
+ *
+ * The schema's filter input is a ``@oneOf`` ``<Table>Filter`` whose ``field``
+ * sub-input (also ``@oneOf``) carries one lookup per column. Multi-column AND
+ * is expressed via the ``all`` combinator (a list of ``<Table>Filter``).
+ * ``fieldKey``/``allKey`` and every operator name are discovered (never
+ * hardcoded), so the code is agnostic to the schema's field casing.
+ */
+export interface FilterMeta {
+  argName: string;
+  filterSdl: string;
+  fieldKey: string;
+  allKey: string;
+  columns: Map<string, FilterColumnMeta>;
+}
+
 export interface TableMeta {
   /** Stable key used in the route and nav (the plural list-field name). */
   name: string;
@@ -117,6 +166,8 @@ export interface TableMeta {
   totalCountField: string;
   limitArg: string | null;
   offsetArg: string | null;
+  cursor: CursorMeta | null;
+  filter: FilterMeta | null;
   /**
    * The list field's ``order`` argument, when present.
    *
@@ -287,6 +338,8 @@ export function discoverSchema(result: IntrospectionResult): DataSchema {
     const limitArg = field.args.find((a) => a.name.toLowerCase() === "limit");
     const offsetArg = field.args.find((a) => a.name.toLowerCase() === "offset");
     const order = buildOrderMeta(typeMap, field, columns);
+    const cursor = buildCursorMeta(typeMap, field, connType);
+    const filter = buildFilterMeta(typeMap, field, columns);
 
     tables.push({
       name: field.name,
@@ -297,6 +350,8 @@ export function discoverSchema(result: IntrospectionResult): DataSchema {
       totalCountField: totalCountFieldDef.name,
       limitArg: limitArg?.name ?? null,
       offsetArg: offsetArg?.name ?? null,
+      cursor,
+      filter,
       order,
       columns,
       pkColumns: [...pkNames],
@@ -386,6 +441,139 @@ function buildOrderMeta(
   };
 }
 
+/**
+ * Discover cursor-pagination metadata from the list field and its connection.
+ *
+ * Reads the ``first``/``after`` arguments off the list field and the
+ * ``pageInfo`` object (and its ``hasNextPage``/``endCursor`` sub-fields) off
+ * the connection type. Conventional names are preferred with a shape fallback
+ * (``pageInfo`` is the OBJECT field whose own fields include a Boolean and a
+ * nullable String). Returns ``null`` if the cursor surface is incomplete.
+ */
+function buildCursorMeta(
+  typeMap: Map<string, TypeDef>,
+  field: FieldDef,
+  connType: TypeDef,
+): CursorMeta | null {
+  const firstArg = field.args.find((a) => a.name.toLowerCase() === "first");
+  const afterArg = field.args.find((a) => a.name.toLowerCase() === "after");
+  if (!firstArg || !afterArg) return null;
+
+  const pageInfoFieldDef =
+    connType.fields?.find((f) => f.name === "pageInfo") ??
+    connType.fields?.find((f) => {
+      const n = namedRef(f.type);
+      const def = n.name ? typeMap.get(n.name) : undefined;
+      return n.kind === "OBJECT" && (def?.fields?.length ?? 0) >= 2;
+    });
+  if (!pageInfoFieldDef) return null;
+  const pageInfoTypeName = namedRef(pageInfoFieldDef.type).name;
+  const pageInfoType = pageInfoTypeName ? typeMap.get(pageInfoTypeName) : undefined;
+  if (!pageInfoType?.fields) return null;
+
+  const hasNextPageDef =
+    pageInfoType.fields.find((f) => f.name === "hasNextPage") ??
+    pageInfoType.fields.find((f) => namedRef(f.type).name === "Boolean");
+  const endCursorDef =
+    pageInfoType.fields.find((f) => f.name === "endCursor") ??
+    pageInfoType.fields.find(
+      (f) => f.type.kind !== "NON_NULL" && namedRef(f.type).name === "String",
+    );
+  if (!hasNextPageDef || !endCursorDef) return null;
+
+  return {
+    firstArg: firstArg.name,
+    afterArg: afterArg.name,
+    pageInfoField: pageInfoFieldDef.name,
+    hasNextPageField: hasNextPageDef.name,
+    endCursorField: endCursorDef.name,
+  };
+}
+
+/** Resolve an operator input value to its expected value kind + scalar type. */
+function operatorMeta(op: InputValue): OperatorMeta {
+  const inner = op.type.kind === "NON_NULL" ? (op.type.ofType ?? op.type) : op.type;
+  // Lists (in_list / not_in_list) accept multiple comma-separated values.
+  if (inner.kind === "LIST") {
+    return { name: op.name, valueKind: "list", scalarType: namedRef(op.type).name ?? "String" };
+  }
+  const named = namedRef(op.type);
+  // Range inputs (e.g. IntRangeInput) are objects with start/end.
+  if (named.kind === "INPUT_OBJECT") {
+    return { name: op.name, valueKind: "range", scalarType: named.name ?? "Unknown" };
+  }
+  if (named.name === "Boolean") {
+    return { name: op.name, valueKind: "boolean", scalarType: "Boolean" };
+  }
+  return { name: op.name, valueKind: "scalar", scalarType: named.name ?? "String" };
+}
+
+/**
+ * Discover the list field's ``filter`` argument shape.
+ *
+ * The filter input is a ``@oneOf`` ``<Table>Filter`` with a ``field`` sub-input
+ * (per-column lookups) and an ``all`` combinator (list of ``<Table>Filter``).
+ * For each column we read its lookup type's operators from introspection.
+ * Returns ``null`` when the table exposes no usable column filters.
+ */
+function buildFilterMeta(
+  typeMap: Map<string, TypeDef>,
+  field: FieldDef,
+  columns: ColumnMeta[],
+): FilterMeta | null {
+  const arg = field.args.find((a) => namedRef(a.type).kind === "INPUT_OBJECT");
+  if (!arg) return null;
+  const filterTypeName = namedRef(arg.type).name;
+  const filterType = filterTypeName ? typeMap.get(filterTypeName) : undefined;
+  if (!filterType?.inputFields?.length) return null;
+
+  const columnNames = new Set(columns.map((c) => c.name));
+
+  // The ``field`` sub-input: an INPUT_OBJECT whose own fields are our columns.
+  let fieldKey: string | null = null;
+  let fieldDef: TypeDef | undefined;
+  for (const sub of filterType.inputFields) {
+    const named = namedRef(sub.type);
+    if (named.kind !== "INPUT_OBJECT" || !named.name) continue;
+    const def = typeMap.get(named.name);
+    const matching = (def?.inputFields ?? []).filter((f) => columnNames.has(f.name));
+    if (matching.length > 0) {
+      fieldKey = sub.name;
+      fieldDef = def;
+      break;
+    }
+  }
+  if (!fieldKey || !fieldDef?.inputFields) return null;
+
+  // The ``all`` combinator: a LIST whose element is the filter type itself.
+  const allArg = filterType.inputFields.find((sub) => {
+    const inner = sub.type.kind === "NON_NULL" ? sub.type.ofType : sub.type;
+    return inner?.kind === "LIST" && namedRef(sub.type).name === filterTypeName;
+  });
+  if (!allArg) return null;
+
+  const filterColumns = new Map<string, FilterColumnMeta>();
+  for (const colField of fieldDef.inputFields) {
+    if (!columnNames.has(colField.name)) continue;
+    const lookupName = namedRef(colField.type).name;
+    const lookupDef = lookupName ? typeMap.get(lookupName) : undefined;
+    if (!lookupDef?.inputFields?.length) continue;
+    filterColumns.set(colField.name, {
+      name: colField.name,
+      operators: lookupDef.inputFields.map(operatorMeta),
+    });
+  }
+  if (filterColumns.size === 0) return null;
+
+  return {
+    argName: arg.name,
+    filterSdl: filterTypeName ?? "Unknown",
+    fieldKey,
+    allKey: allArg.name,
+    columns: filterColumns,
+  };
+}
+
 function buildDeleteMeta(def: FieldDef | undefined): TableMeta["remove"] {
   if (!def) return null;
   return {
@@ -426,29 +614,124 @@ function selectionColumns(meta: TableMeta): string {
 /** A single order entry, e.g. ``{ field: { id: ASC } }``. */
 export type OrderValue = Record<string, Record<string, string>>;
 
+/**
+ * Build the list query.
+ *
+ * Prefers cursor (keyset) pagination (``first``/``after`` + ``pageInfo``) when
+ * the table exposes it — driving infinite scroll — and includes the ``filter``
+ * argument when available. Falls back to ``limit``/``offset`` otherwise.
+ */
 export function buildListQuery(meta: TableMeta): string {
   const varDefs: string[] = [];
   const args: string[] = [];
-  if (meta.limitArg) {
-    varDefs.push("$limit: Int");
-    args.push(`${meta.limitArg}: $limit`);
-  }
-  if (meta.offsetArg) {
-    varDefs.push("$offset: Int");
-    args.push(`${meta.offsetArg}: $offset`);
+  if (meta.cursor) {
+    varDefs.push("$first: Int", "$after: String");
+    args.push(`${meta.cursor.firstArg}: $first`, `${meta.cursor.afterArg}: $after`);
+  } else {
+    if (meta.limitArg) {
+      varDefs.push("$limit: Int");
+      args.push(`${meta.limitArg}: $limit`);
+    }
+    if (meta.offsetArg) {
+      varDefs.push("$offset: Int");
+      args.push(`${meta.offsetArg}: $offset`);
+    }
   }
   if (meta.order) {
     varDefs.push(`$order: [${meta.order.elementSdl}!]`);
     args.push(`${meta.order.argName}: $order`);
   }
+  if (meta.filter) {
+    varDefs.push(`$filter: ${meta.filter.filterSdl}`);
+    args.push(`${meta.filter.argName}: $filter`);
+  }
   const head = varDefs.length ? `(${varDefs.join(", ")})` : "";
   const argStr = args.length ? `(${args.join(", ")})` : "";
+  const pageInfo = meta.cursor
+    ? `${meta.cursor.pageInfoField} { ${meta.cursor.hasNextPageField} ${meta.cursor.endCursorField} }`
+    : "";
   return `query DataList${head} {
   ${meta.listField}${argStr} {
     ${meta.totalCountField}
+    ${pageInfo}
     ${meta.nodesField} { __typename ${selectionColumns(meta)} }
   }
 }`;
+}
+
+/** An active per-column filter chosen in the UI. */
+export interface ActiveFilter {
+  op: string;
+  value: unknown;
+}
+
+/**
+ * Build the ``filter`` variable value from the active per-column filters.
+ *
+ * Honours the schema's ``@oneOf`` constraints: a single column filter is
+ * ``{ field: { col: { op: v } } }``; multiple columns are AND-combined via
+ * ``{ all: [ … ] }`` (each entry sets exactly one column). Returns ``null``
+ * when nothing is active or the table has no filter surface.
+ */
+export function buildFilterValue(
+  meta: TableMeta,
+  filters: Record<string, ActiveFilter>,
+): Record<string, unknown> | null {
+  if (!meta.filter) return null;
+  const { fieldKey, allKey, columns } = meta.filter;
+  const entries: Record<string, unknown>[] = [];
+  for (const [colName, active] of Object.entries(filters)) {
+    const colMeta = columns.get(colName);
+    const opMeta = colMeta?.operators.find((o) => o.name === active.op);
+    if (!opMeta) continue;
+    const value = coerceFilterValue(opMeta, active.value);
+    if (value === undefined) continue;
+    entries.push({ [fieldKey]: { [colName]: { [opMeta.name]: value } } });
+  }
+  if (entries.length === 0) return null;
+  if (entries.length === 1) return entries[0];
+  return { [allKey]: entries };
+}
+
+/** Coerce a raw editor value to the JSON shape a filter operator expects. */
+function coerceFilterValue(op: OperatorMeta, raw: unknown): unknown {
+  // For ``range`` the scalarType is the range input name (e.g. "IntRangeInput");
+  // infer the element numeric-ness from it. For scalar/list it's the scalar name.
+  const isInt = op.scalarType.startsWith("Int");
+  const isFloatish =
+    op.scalarType.startsWith("Float") || op.scalarType.startsWith("Decimal");
+  const isNumeric = isInt || isFloatish;
+  const coerceScalar = (v: unknown): unknown => {
+    if (op.scalarType === "Boolean") return v === true || v === "true";
+    if (!isNumeric) return v;
+    const n = isInt ? Number.parseInt(String(v), 10) : Number.parseFloat(String(v));
+    return Number.isNaN(n) ? undefined : n;
+  };
+  switch (op.valueKind) {
+    case "boolean":
+      return raw === true || raw === "true";
+    case "list": {
+      const parts = String(raw ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s !== "")
+        .map(coerceScalar)
+        .filter((v) => v !== undefined);
+      return parts.length ? parts : undefined;
+    }
+    case "range": {
+      const r = raw as { start?: unknown; end?: unknown } | null;
+      if (!r) return undefined;
+      const start = coerceScalar(r.start);
+      const end = coerceScalar(r.end);
+      if (start === undefined || end === undefined) return undefined;
+      return { start, end };
+    }
+    default: {
+      if (raw === "" || raw === null || raw === undefined) return undefined;
+      return coerceScalar(raw);
+    }
+  }
 }
 
 /**

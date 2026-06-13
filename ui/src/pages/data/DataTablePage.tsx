@@ -1,20 +1,21 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type ColumnDef,
-  type PaginationState,
   type SortingState,
   flexRender,
   getCoreRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "@tanstack/react-router";
 
 import {
+  type ActiveFilter,
   type ColumnMeta,
   type TableMeta,
   buildCreateMutation,
   buildDeleteMutation,
+  buildFilterValue,
   buildListQuery,
   buildOrderValue,
   buildUpdateMutation,
@@ -25,7 +26,18 @@ import {
 import { GraphQLRequestError, useGql } from "@/lib/graphqlClient";
 import { useAuth } from "@/lib/auth";
 
+import { ColumnFilter } from "./ColumnFilter";
 import { useDataSchema } from "./useDataSchema";
+
+/** Rows fetched per page (cursor ``first`` / offset ``limit``). */
+const PAGE_SIZE = 50;
+
+interface Page {
+  rows: Row[];
+  total: number;
+  endCursor: string | null;
+  hasNextPage: boolean;
+}
 
 type Row = Record<string, unknown>;
 
@@ -64,11 +76,8 @@ function TableView({
   const { status } = useAuth();
   const canWrite = status === "authenticated";
 
-  const [pagination, setPagination] = useState<PaginationState>({
-    pageIndex: 0,
-    pageSize: 25,
-  });
   const [sorting, setSorting] = useState<SortingState>([]);
+  const [filters, setFilters] = useState<Record<string, ActiveFilter>>({});
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [creating, setCreating] = useState<Record<string, string>>({});
   const [isCreating, setIsCreating] = useState(false);
@@ -78,6 +87,11 @@ function TableView({
   const createMutationStr = useMemo(() => buildCreateMutation(meta), [meta]);
   const deleteMutationStr = useMemo(() => buildDeleteMutation(meta), [meta]);
 
+  const colByName = useMemo(
+    () => new Map(meta.columns.map((c) => [c.name, c])),
+    [meta],
+  );
+
   // Single-column server-side sort, shaped to the schema's nested order input
   // (``[{ field: { col: ASC|DESC } }]``).
   const order = useMemo(() => {
@@ -86,40 +100,81 @@ function TableView({
     return buildOrderValue(meta, sort.id, sort.desc, sortAsc, sortDesc);
   }, [meta, sorting, sortAsc, sortDesc]);
 
-  const rowsKey = [
-    "data",
-    "rows",
-    meta.name,
-    pagination.pageIndex,
-    pagination.pageSize,
-    order,
-  ] as const;
+  const filterValue = useMemo(() => buildFilterValue(meta, filters), [meta, filters]);
 
-  const { data, isFetching, error } = useQuery({
-    queryKey: rowsKey,
-    queryFn: async () => {
-      const result = await gql<Record<string, { [k: string]: unknown }>>(
-        listQuery,
-        {
-          limit: pagination.pageSize,
-          offset: pagination.pageIndex * pagination.pageSize,
-          order,
-        },
-      );
-      const window = result[meta.listField] as {
-        [k: string]: unknown;
-      };
-      return {
-        rows: (window[meta.nodesField] as Row[]) ?? [],
-        total: (window[meta.totalCountField] as number) ?? 0,
-      };
+  const {
+    data,
+    error,
+    isFetching,
+    isFetchingNextPage,
+    hasNextPage,
+    fetchNextPage,
+  } = useInfiniteQuery({
+    queryKey: ["data", "rows", meta.name, order, filterValue] as const,
+    initialPageParam: null as string | number | null,
+    queryFn: async ({ pageParam }): Promise<Page> => {
+      const vars: Record<string, unknown> = { order, filter: filterValue };
+      if (meta.cursor) {
+        vars.first = PAGE_SIZE;
+        vars.after = pageParam ?? null;
+      } else {
+        vars.limit = PAGE_SIZE;
+        vars.offset = typeof pageParam === "number" ? pageParam : 0;
+      }
+      const result = await gql<Record<string, Record<string, unknown>>>(listQuery, vars);
+      const window = result[meta.listField] ?? {};
+      const pageRows = (window[meta.nodesField] as Row[]) ?? [];
+      const total = (window[meta.totalCountField] as number) ?? 0;
+      if (meta.cursor) {
+        const pi = window[meta.cursor.pageInfoField] as Record<string, unknown> | undefined;
+        return {
+          rows: pageRows,
+          total,
+          endCursor: (pi?.[meta.cursor.endCursorField] as string | null) ?? null,
+          hasNextPage: Boolean(pi?.[meta.cursor.hasNextPageField]),
+        };
+      }
+      return { rows: pageRows, total, endCursor: null, hasNextPage: pageRows.length === PAGE_SIZE };
+    },
+    getNextPageParam: (lastPage, allPages) => {
+      if (meta.cursor) return lastPage.hasNextPage ? (lastPage.endCursor ?? undefined) : undefined;
+      return lastPage.rows.length === PAGE_SIZE ? allPages.length * PAGE_SIZE : undefined;
     },
     placeholderData: (prev) => prev,
   });
 
-  const rows = data?.rows ?? [];
-  const total = data?.total ?? 0;
-  const pageCount = Math.max(1, Math.ceil(total / pagination.pageSize));
+  const rows = useMemo(() => data?.pages.flatMap((p) => p.rows) ?? [], [data]);
+  const total = data?.pages[0]?.total ?? 0;
+  const activeFilterCount = Object.keys(filters).length;
+
+  // Auto-load the next page when the bottom sentinel scrolls into view.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          void fetchNextPage();
+        }
+      },
+      { root: scrollRef.current, rootMargin: "300px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  const applyFilter = useCallback((col: string, filter: ActiveFilter) => {
+    setFilters((prev) => ({ ...prev, [col]: filter }));
+  }, []);
+  const clearFilter = useCallback((col: string) => {
+    setFilters((prev) => {
+      const next = { ...prev };
+      delete next[col];
+      return next;
+    });
+  }, []);
 
   function invalidateRows() {
     void queryClient.invalidateQueries({ queryKey: ["data", "rows", meta.name] });
@@ -222,11 +277,8 @@ function TableView({
     data: rows,
     columns,
     getCoreRowModel: getCoreRowModel(),
-    manualPagination: true,
     manualSorting: true,
-    pageCount,
-    state: { pagination, sorting },
-    onPaginationChange: setPagination,
+    state: { sorting },
     onSortingChange: setSorting,
   });
 
@@ -245,7 +297,18 @@ function TableView({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {isFetching && <span className="text-xs text-zinc-400">Loading…</span>}
+          {isFetching && !isFetchingNextPage && (
+            <span className="text-xs text-zinc-400">Loading…</span>
+          )}
+          {activeFilterCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setFilters({})}
+              className="rounded-md border border-zinc-300 px-2.5 py-1 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+            >
+              Clear {activeFilterCount} filter{activeFilterCount === 1 ? "" : "s"}
+            </button>
+          )}
           {meta.create && (
             <button
               type="button"
@@ -285,7 +348,7 @@ function TableView({
       )}
 
       {/* Table */}
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
         <table className="w-full border-collapse text-sm">
           <thead className="sticky top-0 z-10 bg-zinc-50 dark:bg-zinc-950">
             {tableInstance.getHeaderGroups().map((hg) => (
@@ -293,15 +356,32 @@ function TableView({
                 {hg.headers.map((header) => {
                   const sorted = header.column.getIsSorted();
                   const canSort = header.column.getCanSort();
+                  const colMeta = colByName.get(header.column.id);
+                  const filterCol = meta.filter?.columns.get(header.column.id);
                   return (
                     <th
                       key={header.id}
-                      onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
-                      className={`select-none whitespace-nowrap border-b border-zinc-200 px-3 py-2 text-left font-semibold text-zinc-600 dark:border-zinc-800 dark:text-zinc-300 ${canSort ? "cursor-pointer" : ""}`}
+                      className="select-none whitespace-nowrap border-b border-zinc-200 px-3 py-2 text-left font-semibold text-zinc-600 dark:border-zinc-800 dark:text-zinc-300"
                     >
-                      {flexRender(header.column.columnDef.header, header.getContext())}
-                      {sorted === "asc" && " ▲"}
-                      {sorted === "desc" && " ▼"}
+                      <span className="inline-flex items-center">
+                        <span
+                          onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
+                          className={canSort ? "cursor-pointer" : ""}
+                        >
+                          {flexRender(header.column.columnDef.header, header.getContext())}
+                          {sorted === "asc" && " ▲"}
+                          {sorted === "desc" && " ▼"}
+                        </span>
+                        {colMeta && filterCol && (
+                          <ColumnFilter
+                            column={colMeta}
+                            filterColumn={filterCol}
+                            active={filters[header.column.id]}
+                            onApply={(f) => applyFilter(header.column.id, f)}
+                            onClear={() => clearFilter(header.column.id)}
+                          />
+                        )}
+                      </span>
                     </th>
                   );
                 })}
@@ -381,55 +461,27 @@ function TableView({
                   colSpan={meta.columns.length + (meta.remove ? 1 : 0)}
                   className="px-3 py-8 text-center text-sm text-zinc-500 dark:text-zinc-400"
                 >
-                  No rows.
+                  No rows{activeFilterCount > 0 ? " match the active filters" : ""}.
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+        {/* Infinite-scroll sentinel: observed to auto-load the next page. */}
+        <div ref={sentinelRef} className="h-px w-full" />
+        {isFetchingNextPage && (
+          <div className="py-3 text-center text-xs text-zinc-400">Loading more…</div>
+        )}
       </div>
 
-      {/* Pagination */}
+      {/* Status bar */}
       <div className="flex items-center justify-between gap-3 border-t border-zinc-200 px-4 py-2 text-xs dark:border-zinc-800">
-        <div className="flex items-center gap-2">
-          <span className="text-zinc-500 dark:text-zinc-400">Rows per page</span>
-          <select
-            value={pagination.pageSize}
-            onChange={(e) =>
-              setPagination((p) => ({
-                ...p,
-                pageIndex: 0,
-                pageSize: Number(e.target.value),
-              }))
-            }
-            className="rounded border border-zinc-300 bg-white px-1.5 py-1 dark:border-zinc-700 dark:bg-zinc-800"
-          >
-            {[10, 25, 50, 100].map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
-          {creatable.length === 0 && (
-            <span className="text-zinc-400">(no insertable columns)</span>
-          )}
+        <div className="flex items-center gap-2 text-zinc-500 dark:text-zinc-400">
+          {creatable.length === 0 && <span className="text-zinc-400">(no insertable columns)</span>}
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-zinc-500 dark:text-zinc-400">
-            Page {pagination.pageIndex + 1} of {pageCount}
-          </span>
-          <PagerButton
-            disabled={pagination.pageIndex === 0}
-            onClick={() => tableInstance.previousPage()}
-          >
-            Prev
-          </PagerButton>
-          <PagerButton
-            disabled={pagination.pageIndex + 1 >= pageCount}
-            onClick={() => tableInstance.nextPage()}
-          >
-            Next
-          </PagerButton>
+        <div className="text-zinc-500 dark:text-zinc-400">
+          Loaded {rows.length} of {total} row{total === 1 ? "" : "s"}
+          {!hasNextPage && rows.length > 0 && " · end"}
         </div>
       </div>
     </div>
@@ -531,27 +583,6 @@ function Centered({ children }: { children: React.ReactNode }) {
     <div className="flex h-full items-center justify-center p-8 text-sm text-zinc-500 dark:text-zinc-400">
       {children}
     </div>
-  );
-}
-
-function PagerButton({
-  children,
-  disabled,
-  onClick,
-}: {
-  children: React.ReactNode;
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className="rounded-md border border-zinc-300 px-2 py-1 font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-    >
-      {children}
-    </button>
   );
 }
 
