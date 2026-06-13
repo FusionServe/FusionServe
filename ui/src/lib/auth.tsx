@@ -16,6 +16,7 @@ import {
 } from "oidc-client-ts";
 
 import type { RuntimeConfig } from "./api";
+import { basepath, router } from "./router";
 import { useRuntimeConfig } from "./runtimeConfig";
 
 /**
@@ -26,6 +27,9 @@ import { useRuntimeConfig } from "./runtimeConfig";
  * badge ({@link AuthContextValue.login}). On load we merely (a) complete a
  * redirect callback if the IdP just sent us back, or (b) silently restore a
  * still-valid stored session — neither of which initiates authentication.
+ * The IdP returns to the SPA mount root (a stable ``redirect_uri``); the
+ * route the user was on is preserved via OIDC ``state`` and restored with a
+ * router navigation after the token exchange.
  *
  * Configuration (issuer + public client id) comes from the lazily-loaded
  * runtime config ({@link useRuntimeConfig}); the backend itself only serves a
@@ -118,6 +122,26 @@ function toAuthUser(user: OidcUser): AuthUser {
   };
 }
 
+/**
+ * Absolute mount URL of the SPA (origin + basepath).
+ *
+ * Used as the OIDC ``redirect_uri`` / ``post_logout_redirect_uri``: a single
+ * stable value (the SPA root), independent of the current deep route, so it
+ * matches the URI registered on the IdP client.
+ */
+function mountUrl(): string {
+  return window.location.origin + basepath;
+}
+
+/** The current in-app route (path relative to basepath), stored in OIDC state. */
+function currentRoute(): string {
+  const { pathname } = window.location;
+  const rel = pathname.startsWith(basepath)
+    ? pathname.slice(basepath.length)
+    : pathname.replace(/^\/+/, "");
+  return `/${rel}`;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const { ensureConfig } = useRuntimeConfig();
   const managerRef = useRef<UserManager | null>(null);
@@ -146,10 +170,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     (cfg: RuntimeConfig): UserManager | null => {
       if (managerRef.current) return managerRef.current;
       if (!cfg.jwtIssuer || !cfg.clientId) return null;
-      // Stable static mount of the SPA (the hash route lives in the fragment,
-      // which the IdP preserves separately). Must be a registered redirect
-      // URI on the IdP client.
-      const appUrl = window.location.origin + window.location.pathname;
+      // Redirect back to the SPA mount root (stable across deep routes); the
+      // intended route is preserved separately via OIDC ``state``.
+      const appUrl = mountUrl();
       const settings: UserManagerSettings = {
         authority: cfg.jwtIssuer,
         client_id: cfg.clientId,
@@ -199,7 +222,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (cancelled) return;
       const manager = buildManager(cfg);
       if (!manager) return;
-      const appUrl = window.location.origin + window.location.pathname;
 
       // 1. Complete a redirect callback if the IdP just returned to us.
       if (hasCallback) {
@@ -211,15 +233,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const u = await redirectExchange;
           if (cancelled) return;
           applyUser(u);
-          const hash = typeof u.state === "string" ? u.state : window.location.hash;
-          window.history.replaceState(null, "", appUrl + (hash || ""));
+          // Restore the pre-login route (saved in OIDC state); this also drops
+          // the now-consumed ``?code&state`` query from the URL.
+          const to = typeof u.state === "string" && u.state ? u.state : "/";
+          void router.navigate({ to, replace: true });
         } catch (e) {
           if (!cancelled) {
             setStatus("error");
             setError(e instanceof Error ? e.message : String(e));
           }
           // Drop the (now-consumed) code so a reload doesn't retry it.
-          window.history.replaceState(null, "", appUrl + window.location.hash);
+          void router.navigate({ to: "/", replace: true });
         }
         return;
       }
@@ -259,8 +283,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setError("Authentication is not configured on this server.");
           return;
         }
-        // Preserve the current SPA (hash) route so we can return to it.
-        return manager.signinRedirect({ state: window.location.hash });
+        // Preserve the current SPA route so we can return to it after login.
+        return manager.signinRedirect({ state: currentRoute() });
       })
       .catch((e) => {
         setStatus("error");

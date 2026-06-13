@@ -11,24 +11,27 @@ import { defineConfig } from "vite";
 // ships the SPA without extra packaging configuration.
 //
 // Asset URLs in the emitted ``index.html`` are RELATIVE (``./assets/...``).
-// The browser resolves them against whatever URL the SPA is served at,
-// so the chunks live next to ``index.html`` wherever Litestar mounts
-// the static-files router. That means relocating the SPA is a single
-// Python-side change (override ``settings.ui_path``) — no JS rebuild
-// or sync constant is required.
+// The SPA uses browser-history (path) routing, so those relative URLs are
+// resolved against the document's ``<base href>`` rather than the current
+// deep route. ``index.html`` ships ``<base href="/">``; in production the
+// backend (``fusionserve.ui.build_spa_route_handler``) rewrites it to
+// ``settings.ui_path`` before serving, so the chunks resolve to
+// ``<ui_path>/assets/...`` for any route. Relocating the SPA therefore
+// stays a single Python-side change (override ``settings.ui_path``) — no JS
+// rebuild or sync constant is required.
 //
-// In production the SPA is served by Litestar's static-files router
-// (built by ``fusionserve.ui.build_spa_route_handler``), mounted at
-// ``settings.ui_path`` (default ``/api/-/``). Users typically arrive
-// via the ``<base_path>/`` -> ``settings.ui_path`` redirect emitted by
+// In production the SPA is served by Litestar (built by
+// ``fusionserve.ui.build_spa_route_handler``): an assets static router at
+// ``<ui_path>assets`` plus a base-href-injecting ``index.html`` handler that
+// also acts as the deep-link fallback. Users typically arrive via the
+// ``<base_path>/`` -> ``settings.ui_path`` redirect emitted by
 // ``fusionserve.ui.RedirectRenderPlugin``.
 //
 // Dev workflow: ``pnpm run dev`` in ``ui/`` starts Vite's dev server at
 // ``http://localhost:5173/`` and proxies ``/api/*`` requests to the
-// backend at ``http://localhost:8001``. In dev the SPA is reached at
-// the dev-server root (Vite's history fallback serves ``index.html``);
-// hash routing keeps deep-link URLs identical between dev and prod
-// apart from the path prefix.
+// backend at ``http://localhost:8001``. In dev the SPA is reached at the
+// dev-server root (base ``/``); Vite's history fallback serves
+// ``index.html`` for client-side deep links.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const bundleDir = path.resolve(__dirname, "../src/fusionserve/web/dist");
 

@@ -2,6 +2,15 @@
 <html lang="en" class="h-full">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      The SPA uses browser-history (path) routing. ``<base href>`` makes the
+      relative ``./assets/...`` URLs Vite emits resolve against the mount
+      directory regardless of the current deep route, and lets the SPA derive
+      its router basepath from ``document.baseURI``. This default ``/`` is
+      used in dev; in production the backend rewrites it to ``settings.ui_path``
+      (see ``fusionserve.ui.build_spa_route_handler``).
+    -->
+    <base href="/" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>FusionServe</title>
