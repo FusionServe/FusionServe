@@ -23,7 +23,7 @@ export function OpenAPIPage() {
   }, [ensureConfig]);
 
   return (
-    <div className="h-[calc(100vh-9rem)] overflow-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
+    <div className="h-full overflow-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
       {config ? (
         <SwaggerUI url={config.openapiUrl} />
       ) : (

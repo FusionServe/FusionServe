@@ -34,7 +34,7 @@ function LazyRoute({ children, label }: { children: ReactNode; label: string }) 
   return (
     <Suspense
       fallback={
-        <div className="flex h-[calc(100vh-9rem)] items-center justify-center text-sm text-zinc-500 dark:text-zinc-400">
+        <div className="flex h-full items-center justify-center text-sm text-zinc-500 dark:text-zinc-400">
           {label}
         </div>
       }

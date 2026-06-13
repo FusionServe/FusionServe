@@ -25,7 +25,7 @@ function DataLayoutInner() {
   const { data, isLoading, error } = useDataSchema();
 
   return (
-    <div className="flex h-[calc(100vh-9rem)] gap-4">
+    <div className="flex h-full gap-4">
       <aside className="w-60 shrink-0 overflow-y-auto rounded-lg border border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-900">
         <p className="px-2 py-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
           Tables

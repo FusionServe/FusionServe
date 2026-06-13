@@ -42,14 +42,14 @@ export function GraphQLPage() {
 
   if (!fetcher) {
     return (
-      <div className="flex h-[calc(100vh-9rem)] items-center justify-center text-sm text-zinc-500 dark:text-zinc-400">
+      <div className="flex h-full items-center justify-center text-sm text-zinc-500 dark:text-zinc-400">
         Loading…
       </div>
     );
   }
 
   return (
-    <div className="h-[calc(100vh-9rem)] overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+    <div className="h-full overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
       {/* ``forcedTheme`` keeps GraphiQL in lockstep with the app-wide
           theme toggle instead of GraphiQL's own persisted setting.
           Passing ``plugins`` *replaces* GraphiQL's default ``[HISTORY_PLUGIN]``
