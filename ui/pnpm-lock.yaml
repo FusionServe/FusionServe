@@ -10,10 +10,10 @@ importers:
     dependencies:
       '@graphiql/plugin-explorer':
         specifier: ^5.1.2
-        version: 5.1.2(@graphiql/react@0.37.5(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
+        version: 5.1.2(@graphiql/react@0.37.5(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       '@graphiql/toolkit':
         specifier: ^0.12.0
-        version: 0.12.0(@types/node@22.19.19)(graphql@16.14.0)
+        version: 0.12.0(@types/node@24.13.2)(graphql@16.14.0)
       '@tanstack/react-query':
         specifier: ^5.100.14
         version: 5.100.14(react@19.2.6)
@@ -25,7 +25,7 @@ importers:
         version: 8.21.3(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       graphiql:
         specifier: ^5.2.3
-        version: 5.2.3(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
+        version: 5.2.3(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
       graphql:
         specifier: ^16.14.0
         version: 16.14.0
@@ -50,10 +50,10 @@ importers:
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4.0.0
-        version: 4.3.0(vite@8.0.13(@types/node@22.19.19)(jiti@2.7.0))
+        version: 4.3.0(vite@8.0.13(@types/node@24.13.2)(jiti@2.7.0))
       '@types/node':
-        specifier: ^22.0.0
-        version: 22.19.19
+        specifier: ^24.0.0
+        version: 24.13.2
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.14
@@ -65,7 +65,7 @@ importers:
         version: 5.18.0
       '@vitejs/plugin-react':
         specifier: ^6.0.0
-        version: 6.0.2(vite@8.0.13(@types/node@22.19.19)(jiti@2.7.0))
+        version: 6.0.2(vite@8.0.13(@types/node@24.13.2)(jiti@2.7.0))
       tailwindcss:
         specifier: ^4.0.0
         version: 4.3.0
@@ -74,7 +74,7 @@ importers:
         version: 5.9.3
       vite:
         specifier: ^8.0.0
-        version: 8.0.13(@types/node@22.19.19)(jiti@2.7.0)
+        version: 8.0.13(@types/node@24.13.2)(jiti@2.7.0)
 
 packages:
 
@@ -937,8 +937,8 @@ packages:
   '@types/hast@3.0.4':
     resolution: {integrity: sha512-WPs+bbQw5aCj+x6laNGWLH3wviHtoCv/P3+otBhbOhJgG8qtpdAMlTCxLtsTWA7LH1Oh/bFCHsBn0TPS5m30EQ==}
 
-  '@types/node@22.19.19':
-    resolution: {integrity: sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew==}
+  '@types/node@24.13.2':
+    resolution: {integrity: sha512-fRa09kZTgu8o71KFcDjUFuc7F+dEbZYZmkI0mg5YBTRs0yMKjYHsq/c0urDKeDb+D5qVgXOdFcuu+DZPKOITwA==}
 
   '@types/prismjs@1.26.6':
     resolution: {integrity: sha512-vqlvI7qlMvcCBbVe0AKAb4f97//Hy0EBTaiW8AalRnG/xAN5zOiWWyrNqNXeq8+KAuvRewjCVY1+IPxk4RdNYw==}
@@ -1871,8 +1871,8 @@ packages:
   uc.micro@2.1.0:
     resolution: {integrity: sha512-ARDJmphmdvUk6Glw7y9DQ2bFkKBHwQHLi2lsaH6PPmz/Ka9sFOBsBluozhDltWmnv9u/cF6Rt87znRTPV+yp/A==}
 
-  undici-types@6.21.0:
-    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
+  undici-types@7.18.2:
+    resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
 
   unraw@3.0.0:
     resolution: {integrity: sha512-08/DA66UF65OlpUDIQtbJyrqTR0jTAlJ+jsnkQ4jxR7+K5g5YG1APZKQSMCE1vqqmD+2pv6+IdEjmopFatacvg==}
@@ -2034,9 +2034,9 @@ snapshots:
 
   '@floating-ui/utils@0.2.11': {}
 
-  '@graphiql/plugin-doc-explorer@0.4.2(@graphiql/react@0.37.5(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))':
+  '@graphiql/plugin-doc-explorer@0.4.2(@graphiql/react@0.37.5(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))':
     dependencies:
-      '@graphiql/react': 0.37.5(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
+      '@graphiql/react': 0.37.5(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
       '@headlessui/react': 2.2.10(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       graphql: 16.14.0
       react: 19.2.6
@@ -2048,18 +2048,18 @@ snapshots:
       - immer
       - use-sync-external-store
 
-  '@graphiql/plugin-explorer@5.1.2(@graphiql/react@0.37.5(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)':
+  '@graphiql/plugin-explorer@5.1.2(@graphiql/react@0.37.5(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)':
     dependencies:
-      '@graphiql/react': 0.37.5(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
+      '@graphiql/react': 0.37.5(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
       graphiql-explorer: 0.9.0(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       graphql: 16.14.0
       react: 19.2.6
       react-dom: 19.2.6(react@19.2.6)
 
-  '@graphiql/plugin-history@0.4.2(@graphiql/react@0.37.5(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(@types/node@22.19.19)(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))':
+  '@graphiql/plugin-history@0.4.2(@graphiql/react@0.37.5(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(@types/node@24.13.2)(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))':
     dependencies:
-      '@graphiql/react': 0.37.5(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
-      '@graphiql/toolkit': 0.12.0(@types/node@22.19.19)(graphql@16.14.0)
+      '@graphiql/react': 0.37.5(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
+      '@graphiql/toolkit': 0.12.0(@types/node@24.13.2)(graphql@16.14.0)
       react: 19.2.6
       react-compiler-runtime: 19.1.0-rc.1(react@19.2.6)
       react-dom: 19.2.6(react@19.2.6)
@@ -2072,9 +2072,9 @@ snapshots:
       - immer
       - use-sync-external-store
 
-  '@graphiql/react@0.37.5(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))':
+  '@graphiql/react@0.37.5(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))':
     dependencies:
-      '@graphiql/toolkit': 0.12.0(@types/node@22.19.19)(graphql@16.14.0)
+      '@graphiql/toolkit': 0.12.0(@types/node@24.13.2)(graphql@16.14.0)
       '@radix-ui/react-dialog': 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       '@radix-ui/react-dropdown-menu': 2.1.16(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       '@radix-ui/react-tooltip': 1.2.8(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
@@ -2103,11 +2103,11 @@ snapshots:
       - immer
       - use-sync-external-store
 
-  '@graphiql/toolkit@0.12.0(@types/node@22.19.19)(graphql@16.14.0)':
+  '@graphiql/toolkit@0.12.0(@types/node@24.13.2)(graphql@16.14.0)':
     dependencies:
       '@n1ru4l/push-pull-async-iterable-iterator': 3.2.0
       graphql: 16.14.0
-      meros: 1.3.2(@types/node@22.19.19)
+      meros: 1.3.2(@types/node@24.13.2)
     transitivePeerDependencies:
       - '@types/node'
 
@@ -3049,12 +3049,12 @@ snapshots:
       '@tailwindcss/oxide-win32-arm64-msvc': 4.3.0
       '@tailwindcss/oxide-win32-x64-msvc': 4.3.0
 
-  '@tailwindcss/vite@4.3.0(vite@8.0.13(@types/node@22.19.19)(jiti@2.7.0))':
+  '@tailwindcss/vite@4.3.0(vite@8.0.13(@types/node@24.13.2)(jiti@2.7.0))':
     dependencies:
       '@tailwindcss/node': 4.3.0
       '@tailwindcss/oxide': 4.3.0
       tailwindcss: 4.3.0
-      vite: 8.0.13(@types/node@22.19.19)(jiti@2.7.0)
+      vite: 8.0.13(@types/node@24.13.2)(jiti@2.7.0)
 
   '@tanstack/history@1.162.0': {}
 
@@ -3123,9 +3123,9 @@ snapshots:
     dependencies:
       '@types/unist': 3.0.3
 
-  '@types/node@22.19.19':
+  '@types/node@24.13.2':
     dependencies:
-      undici-types: 6.21.0
+      undici-types: 7.18.2
 
   '@types/prismjs@1.26.6': {}
 
@@ -3154,10 +3154,10 @@ snapshots:
 
   '@types/use-sync-external-store@0.0.6': {}
 
-  '@vitejs/plugin-react@6.0.2(vite@8.0.13(@types/node@22.19.19)(jiti@2.7.0))':
+  '@vitejs/plugin-react@6.0.2(vite@8.0.13(@types/node@24.13.2)(jiti@2.7.0))':
     dependencies:
       '@rolldown/pluginutils': 1.0.1
-      vite: 8.0.13(@types/node@22.19.19)(jiti@2.7.0)
+      vite: 8.0.13(@types/node@24.13.2)(jiti@2.7.0)
 
   agent-base@6.0.2:
     dependencies:
@@ -3391,11 +3391,11 @@ snapshots:
       react: 19.2.6
       react-dom: 19.2.6(react@19.2.6)
 
-  graphiql@5.2.3(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)):
+  graphiql@5.2.3(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)):
     dependencies:
-      '@graphiql/plugin-doc-explorer': 0.4.2(@graphiql/react@0.37.5(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
-      '@graphiql/plugin-history': 0.4.2(@graphiql/react@0.37.5(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(@types/node@22.19.19)(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
-      '@graphiql/react': 0.37.5(@types/node@22.19.19)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
+      '@graphiql/plugin-doc-explorer': 0.4.2(@graphiql/react@0.37.5(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
+      '@graphiql/plugin-history': 0.4.2(@graphiql/react@0.37.5(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6)))(@types/node@24.13.2)(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
+      '@graphiql/react': 0.37.5(@types/node@24.13.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(graphql@16.14.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(use-sync-external-store@1.6.0(react@19.2.6))
       graphql: 16.14.0
       react: 19.2.6
       react-compiler-runtime: 19.1.0-rc.1(react@19.2.6)
@@ -3591,9 +3591,9 @@ snapshots:
 
   mdurl@2.0.0: {}
 
-  meros@1.3.2(@types/node@22.19.19):
+  meros@1.3.2(@types/node@24.13.2):
     optionalDependencies:
-      '@types/node': 22.19.19
+      '@types/node': 24.13.2
 
   mime-db@1.52.0: {}
 
@@ -4039,7 +4039,7 @@ snapshots:
 
   uc.micro@2.1.0: {}
 
-  undici-types@6.21.0: {}
+  undici-types@7.18.2: {}
 
   unraw@3.0.0: {}
 
@@ -4067,7 +4067,7 @@ snapshots:
     dependencies:
       react: 19.2.6
 
-  vite@8.0.13(@types/node@22.19.19)(jiti@2.7.0):
+  vite@8.0.13(@types/node@24.13.2)(jiti@2.7.0):
     dependencies:
       lightningcss: 1.32.0
       picomatch: 4.0.4
@@ -4075,7 +4075,7 @@ snapshots:
       rolldown: 1.0.1
       tinyglobby: 0.2.16
     optionalDependencies:
-      '@types/node': 22.19.19
+      '@types/node': 24.13.2
       fsevents: 2.3.3
       jiti: 2.7.0
 
