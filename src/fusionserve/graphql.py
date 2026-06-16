@@ -58,7 +58,7 @@ from strawberry_orm import StrawberryORM
 
 from . import auth
 from .config import settings
-from .connections import build_connection_field
+from .connections import build_connection_field, materialize
 from .models import FunctionInfo, FunctionReturnKind, Introspection, RecordNotFoundError, SmartComment
 from .persistence import async_session, inflect, role_config_statement
 
@@ -478,8 +478,10 @@ def _attach_pk_field(query_cls: type, orm_class: type, gql_type: type) -> None:
         statement = select(orm_class)
         for key, value in kwids.items():
             statement = statement.where(getattr(orm_class, key) == value)
-        session = info.context.session
-        result = (await session.execute(statement)).scalar_one_or_none()
+        # Route through the optimizer so nested relations selected on the record
+        # are eager-loaded (otherwise they async-lazy-load -> greenlet error).
+        rows = await materialize(statement, info)
+        result = rows[0] if rows else None
         if result is None:
             raise RecordNotFoundError(f"No {table.name} record matches {kwids}")
         return result
