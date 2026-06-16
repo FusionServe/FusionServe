@@ -216,8 +216,14 @@ def _keyset_predicate(specs: list[_KeySpec], values: list[Any], *, before: bool)
 # -- Field builder -------------------------------------------------------------
 
 
-async def _materialize(stmt: Select, info: Any) -> list[Any]:
-    """Eager-load per the selection set and execute on the role-scoped session."""
+async def materialize(stmt: Select, info: Any) -> list[Any]:
+    """Eager-load per the selection set and execute on the role-scoped session.
+
+    Routes the statement through strawberry-orm's optimizer so the GraphQL
+    selection set drives ``selectinload``/``joinedload`` (no N+1 / no async
+    lazy-load), executing on the request's role-scoped session. Shared by the
+    connection resolvers and the primary-key lookup field.
+    """
     result = optimize_query_nodes(stmt, info)
     if inspect.isawaitable(result):
         result = await result
@@ -279,7 +285,7 @@ def build_connection_field(
             else:
                 ordered = ordered.order_by(*forward_clauses)
             stmt = ordered.offset(skip).limit(page_size + 1)
-            rows = await _materialize(stmt, info)
+            rows = await materialize(stmt, info)
             has_next = len(rows) > page_size
             rows = rows[:page_size]
             has_previous = skip > 0
@@ -296,7 +302,7 @@ def build_connection_field(
                 [desc(s.column) if s.is_asc else asc(s.column) for s in specs] if backward else forward_clauses
             )
             stmt = stmt.order_by(*page_clauses).limit(size + 1)
-            rows = await _materialize(stmt, info)
+            rows = await materialize(stmt, info)
             extra = len(rows) > size
             rows = rows[:size]
             if backward:

@@ -443,6 +443,20 @@ def test_graphql_pk_lookup(graphql_client):
     assert body["data"]["author"]["name"] == "Alice"
 
 
+def test_graphql_pk_lookup_eager_loads_relations(graphql_client):
+    """pk lookup eager-loads nested relations (no async lazy-load greenlet error)."""
+    # to-many relation under a pk lookup
+    by_author = graphql_client("{ author(id: 1) { name books { title } } }", token="alice-token")
+    assert "errors" not in by_author, by_author
+    titles = {b["title"] for b in by_author["data"]["author"]["books"]}
+    assert {"Public Alice", "Secret Alice"} <= titles
+
+    # to-one relation under a pk lookup
+    by_book = graphql_client("{ book(id: 1) { title author { name } } }", token="alice-token")
+    assert "errors" not in by_book, by_book
+    assert by_book["data"]["book"]["author"]["name"] == "Alice"
+
+
 def test_graphql_nested_relationship(graphql_client):
     """Authenticated nested query traverses author -> books via the optimizer.
 
