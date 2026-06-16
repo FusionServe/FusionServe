@@ -155,6 +155,23 @@ export interface FilterMeta {
   columns: Map<string, FilterColumnMeta>;
 }
 
+/**
+ * A relationship field on a row type.
+ *
+ * The GraphQL schema exposes relationships as nested object fields: to-one as
+ * ``Target`` and to-many as ``[Target!]``. ``targetType`` is the related row
+ * type name (matched back to a {@link TableMeta} via its ``rowType``).
+ */
+export interface RelationMeta {
+  /** Relation field name on the row type, e.g. "author" / "books". */
+  name: string;
+  label: string;
+  /** ``true`` for to-many (list) relations, ``false`` for to-one. */
+  toMany: boolean;
+  /** Related row type name, e.g. "Author". */
+  targetType: string;
+}
+
 export interface TableMeta {
   /** Stable key used in the route and nav (the plural list-field name). */
   name: string;
@@ -185,7 +202,11 @@ export interface TableMeta {
   } | null;
   /** Scalar/enum columns (relationships excluded). */
   columns: ColumnMeta[];
+  /** Relationship fields on the row type (object / list-of-object). */
+  relations: RelationMeta[];
   pkColumns: string[];
+  /** The singular primary-key lookup query field (for lazy detail fetches). */
+  pkLookup: { field: string; pkArgs: ArgMeta[] } | null;
   create: { field: string; inputArg: ArgMeta } | null;
   update: { field: string; patchArg: ArgMeta; pkArgs: ArgMeta[] } | null;
   remove: { field: string; pkArgs: ArgMeta[] } | null;
@@ -205,6 +226,16 @@ function namedRef(ref: TypeRef): TypeRef {
     current = current.ofType;
   }
   return current;
+}
+
+/** ``true`` if ``ref`` has a ``LIST`` anywhere in its wrapper chain. */
+function hasListWrapper(ref: TypeRef): boolean {
+  let current: TypeRef | null = ref;
+  while (current) {
+    if (current.kind === "LIST") return true;
+    current = current.ofType;
+  }
+  return false;
 }
 
 function typeRefToSDL(ref: TypeRef): string {
@@ -314,24 +345,34 @@ export function discoverSchema(result: IntrospectionResult): DataSchema {
       ? inputFieldNameSet(typeMap, update.patchArg)
       : new Set<string>();
 
-    // Columns: scalar/enum row fields only (relationships excluded).
+    // Columns: scalar/enum row fields. Relations: object / list-of-object
+    // fields (to-one / to-many) — collected separately for the detail panel.
     const columns: ColumnMeta[] = [];
+    const relations: RelationMeta[] = [];
     for (const f of rowType.fields) {
       const named = namedRef(f.type);
-      if (named.kind !== "SCALAR" && named.kind !== "ENUM") continue;
-      columns.push({
-        name: f.name,
-        scalarType: named.name ?? "Unknown",
-        editor: editorForColumn(named),
-        enumValues:
-          named.kind === "ENUM" && named.name
-            ? (typeMap.get(named.name)?.enumValues ?? []).map((e) => e.name)
-            : undefined,
-        nullable: f.type.kind !== "NON_NULL",
-        isPk: pkNames.has(f.name),
-        creatable: inputFieldNames.has(f.name),
-        updatable: patchFieldNames.has(f.name),
-      });
+      if (named.kind === "SCALAR" || named.kind === "ENUM") {
+        columns.push({
+          name: f.name,
+          scalarType: named.name ?? "Unknown",
+          editor: editorForColumn(named),
+          enumValues:
+            named.kind === "ENUM" && named.name
+              ? (typeMap.get(named.name)?.enumValues ?? []).map((e) => e.name)
+              : undefined,
+          nullable: f.type.kind !== "NON_NULL",
+          isPk: pkNames.has(f.name),
+          creatable: inputFieldNames.has(f.name),
+          updatable: patchFieldNames.has(f.name),
+        });
+      } else if (named.kind === "OBJECT" && named.name) {
+        relations.push({
+          name: f.name,
+          label: humanize(f.name),
+          toMany: hasListWrapper(f.type),
+          targetType: named.name,
+        });
+      }
     }
 
     // Pagination args by name (the backend exposes literal limit/offset).
@@ -340,6 +381,7 @@ export function discoverSchema(result: IntrospectionResult): DataSchema {
     const order = buildOrderMeta(typeMap, field, columns);
     const cursor = buildCursorMeta(typeMap, field, connType);
     const filter = buildFilterMeta(typeMap, field, columns);
+    const pkLookup = buildPkLookupMeta(queryType, rowTypeName, pkNames);
 
     tables.push({
       name: field.name,
@@ -354,7 +396,9 @@ export function discoverSchema(result: IntrospectionResult): DataSchema {
       filter,
       order,
       columns,
+      relations,
       pkColumns: [...pkNames],
+      pkLookup,
       create,
       update,
       remove,
@@ -439,6 +483,34 @@ function buildOrderMeta(
     fieldKey,
     sortableColumns,
   };
+}
+
+/**
+ * Discover the singular primary-key lookup query field for a row type.
+ *
+ * The backend attaches one field per table that returns a single record by its
+ * primary key (e.g. ``author(id: Int!)``). We find the Query field whose return
+ * type is the row type (not a ``*Connection``) and whose argument names match
+ * the primary-key columns, capturing its name and argument SDLs so the detail
+ * panel can lazily fetch a row's relations.
+ */
+function buildPkLookupMeta(
+  queryType: TypeDef | undefined,
+  rowTypeName: string,
+  pkNames: Set<string>,
+): TableMeta["pkLookup"] {
+  if (!queryType?.fields || pkNames.size === 0) return null;
+  for (const field of queryType.fields) {
+    const named = namedRef(field.type);
+    if (named.kind !== "OBJECT" || named.name !== rowTypeName) continue;
+    if (field.args.length !== pkNames.size) continue;
+    if (!field.args.every((a) => pkNames.has(a.name))) continue;
+    return {
+      field: field.name,
+      pkArgs: field.args.map((a) => ({ name: a.name, sdl: typeRefToSDL(a.type) })),
+    };
+  }
+  return null;
 }
 
 /**
@@ -609,6 +681,66 @@ function discoverSortDirection(
 
 function selectionColumns(meta: TableMeta): string {
   return meta.columns.map((c) => c.name).join(" ");
+}
+
+// ---- Relations ----
+
+/** Resolve a relation's target table (matched by row type), if it's listed. */
+export function relationTargetTable(
+  schema: DataSchema,
+  relation: RelationMeta,
+): TableMeta | undefined {
+  return schema.tables.find((t) => t.rowType === relation.targetType);
+}
+
+const DISPLAY_COLUMN_HINTS = ["name", "title", "label", "slug", "email", "code"];
+
+/**
+ * Pick a representative "display" column for a table.
+ *
+ * Prefers a conventional label column (name/title/label/…), else the first
+ * non-PK text column, else the first primary-key column. Used for link text and
+ * compact related-record rendering.
+ */
+export function displayColumn(meta: TableMeta): ColumnMeta | undefined {
+  const byHint = meta.columns.find((c) =>
+    DISPLAY_COLUMN_HINTS.includes(c.name.toLowerCase()),
+  );
+  if (byHint) return byHint;
+  const text = meta.columns.find((c) => c.editor === "text" && !c.isPk);
+  if (text) return text;
+  return meta.columns.find((c) => c.isPk) ?? meta.columns[0];
+}
+
+/** Stable string key for a row, derived from its primary-key value(s). */
+export function rowKey(meta: TableMeta, row: Record<string, unknown>): string {
+  return meta.pkColumns.map((c) => String(row[c])).join("\u241f");
+}
+
+/**
+ * Build the singular primary-key lookup query selecting one level of relations.
+ *
+ * Each relation is selected with the target table's scalar columns (no
+ * nested-of-nested relations), so the detail panel can render related records
+ * without risking deep/cyclic queries. Returns ``null`` when the table has no
+ * PK-lookup field or no relations.
+ */
+export function buildDetailQuery(meta: TableMeta, schema: DataSchema): string | null {
+  if (!meta.pkLookup || meta.relations.length === 0) return null;
+  const { field, pkArgs } = meta.pkLookup;
+  const varDefs = pkArgs.map((a) => `$${a.name}: ${a.sdl}`);
+  const callArgs = pkArgs.map((a) => `${a.name}: $${a.name}`);
+  const relationSelections = meta.relations.map((rel) => {
+    const target = relationTargetTable(schema, rel);
+    const cols = target ? selectionColumns(target) : "__typename";
+    return `${rel.name} { __typename ${cols} }`;
+  });
+  return `query DataDetail(${varDefs.join(", ")}) {
+  ${field}(${callArgs.join(", ")}) {
+    __typename
+    ${relationSelections.join("\n    ")}
+  }
+}`;
 }
 
 /** A single order entry, e.g. ``{ field: { id: ASC } }``. */

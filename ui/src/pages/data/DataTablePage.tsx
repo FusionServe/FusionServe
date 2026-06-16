@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type ColumnDef,
   type SortingState,
@@ -12,6 +12,7 @@ import { useParams } from "@tanstack/react-router";
 import {
   type ActiveFilter,
   type ColumnMeta,
+  type DataSchema,
   type TableMeta,
   buildCreateMutation,
   buildDeleteMutation,
@@ -22,11 +23,13 @@ import {
   coerceValue,
   formatValue,
   pkVariables,
+  rowKey,
 } from "@/lib/dataSchema";
 import { GraphQLRequestError, useGql } from "@/lib/graphqlClient";
 import { useAuth } from "@/lib/auth";
 
 import { ColumnFilter } from "./ColumnFilter";
+import { RelationDetail } from "./RelationDetail";
 import { useDataSchema } from "./useDataSchema";
 
 /** Rows fetched per page (cursor ``first`` / offset ``limit``). */
@@ -59,15 +62,25 @@ export function DataTablePage() {
     return <Centered>Unknown table “{table}”.</Centered>;
   }
   // Remount per table so internal state (pagination, sorting, draft) resets.
-  return <TableView key={meta.name} meta={meta} sortAsc={schema.sortAsc} sortDesc={schema.sortDesc} />;
+  return (
+    <TableView
+      key={meta.name}
+      meta={meta}
+      schema={schema}
+      sortAsc={schema.sortAsc}
+      sortDesc={schema.sortDesc}
+    />
+  );
 }
 
 function TableView({
   meta,
+  schema,
   sortAsc,
   sortDesc,
 }: {
   meta: TableMeta;
+  schema: DataSchema;
   sortAsc: string;
   sortDesc: string;
 }) {
@@ -81,6 +94,19 @@ function TableView({
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [creating, setCreating] = useState<Record<string, string>>({});
   const [isCreating, setIsCreating] = useState(false);
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+
+  // Relations are shown in a lazily-fetched detail row, expandable per row,
+  // but only when the table exposes relations and a PK-lookup to fetch them.
+  const canExpand = meta.relations.length > 0 && meta.pkLookup !== null;
+  const toggleExpanded = useCallback((key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   const listQuery = useMemo(() => buildListQuery(meta), [meta]);
   const updateMutationStr = useMemo(() => buildUpdateMutation(meta), [meta]);
@@ -283,6 +309,8 @@ function TableView({
   });
 
   const creatable = meta.columns.filter((c) => c.creatable);
+  const colCount =
+    (canExpand ? 1 : 0) + meta.columns.length + (meta.remove ? 1 : 0);
 
   return (
     <div className="flex h-full flex-col">
@@ -353,6 +381,9 @@ function TableView({
           <thead className="sticky top-0 z-10 bg-zinc-50 dark:bg-zinc-950">
             {tableInstance.getHeaderGroups().map((hg) => (
               <tr key={hg.id}>
+                {canExpand && (
+                  <th className="w-8 border-b border-zinc-200 px-2 py-2 dark:border-zinc-800" />
+                )}
                 {hg.headers.map((header) => {
                   const sorted = header.column.getIsSorted();
                   const canSort = header.column.getCanSort();
@@ -394,6 +425,9 @@ function TableView({
           <tbody>
             {isCreating && meta.create && (
               <tr className="bg-blue-50/50 dark:bg-blue-950/20">
+                {canExpand && (
+                  <td className="border-b border-zinc-100 dark:border-zinc-800" />
+                )}
                 {meta.columns.map((col) => (
                   <td key={col.name} className="border-b border-zinc-100 px-3 py-1.5 dark:border-zinc-800">
                     {col.creatable ? (
@@ -423,42 +457,65 @@ function TableView({
                 </td>
               </tr>
             )}
-            {tableInstance.getRowModel().rows.map((row) => (
-              <tr
-                key={row.id}
-                className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
-              >
-                {row.getVisibleCells().map((cell) => (
-                  <td
-                    key={cell.id}
-                    className="max-w-xs truncate border-b border-zinc-100 px-3 py-1.5 align-top dark:border-zinc-800"
-                  >
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
-                ))}
-                {meta.remove && (
-                  <td className="border-b border-zinc-100 px-3 py-1.5 text-right dark:border-zinc-800">
-                    <button
-                      type="button"
-                      disabled={!canWrite || deleteMutation.isPending}
-                      onClick={() => {
-                        if (window.confirm("Delete this row?")) {
-                          deleteMutation.mutate(row.original);
-                        }
-                      }}
-                      title={canWrite ? "Delete row" : "Sign in to modify data"}
-                      className="rounded p-1 text-zinc-400 transition-colors hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-red-950/40"
-                    >
-                      <TrashIcon />
-                    </button>
-                  </td>
-                )}
-              </tr>
-            ))}
+            {tableInstance.getRowModel().rows.map((row) => {
+              const key = canExpand ? rowKey(meta, row.original) : row.id;
+              const isOpen = canExpand && expanded.has(key);
+              return (
+                <Fragment key={row.id}>
+                  <tr className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                    {canExpand && (
+                      <td className="border-b border-zinc-100 px-2 py-1.5 align-top dark:border-zinc-800">
+                        <button
+                          type="button"
+                          onClick={() => toggleExpanded(key)}
+                          aria-label={isOpen ? "Collapse related" : "Expand related"}
+                          aria-expanded={isOpen}
+                          className="rounded p-0.5 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                        >
+                          <ChevronIcon open={isOpen} />
+                        </button>
+                      </td>
+                    )}
+                    {row.getVisibleCells().map((cell) => (
+                      <td
+                        key={cell.id}
+                        className="max-w-xs truncate border-b border-zinc-100 px-3 py-1.5 align-top dark:border-zinc-800"
+                      >
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                    {meta.remove && (
+                      <td className="border-b border-zinc-100 px-3 py-1.5 text-right dark:border-zinc-800">
+                        <button
+                          type="button"
+                          disabled={!canWrite || deleteMutation.isPending}
+                          onClick={() => {
+                            if (window.confirm("Delete this row?")) {
+                              deleteMutation.mutate(row.original);
+                            }
+                          }}
+                          title={canWrite ? "Delete row" : "Sign in to modify data"}
+                          className="rounded p-1 text-zinc-400 transition-colors hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-red-950/40"
+                        >
+                          <TrashIcon />
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                  {isOpen && (
+                    <tr>
+                      <td colSpan={colCount} className="border-b border-zinc-200 p-0 dark:border-zinc-800">
+                        <RelationDetail meta={meta} schema={schema} row={row.original} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
             {rows.length === 0 && !isFetching && (
               <tr>
                 <td
-                  colSpan={meta.columns.length + (meta.remove ? 1 : 0)}
+                  colSpan={colCount}
                   className="px-3 py-8 text-center text-sm text-zinc-500 dark:text-zinc-400"
                 >
                   No rows{activeFilterCount > 0 ? " match the active filters" : ""}.
@@ -583,6 +640,23 @@ function Centered({ children }: { children: React.ReactNode }) {
     <div className="flex h-full items-center justify-center p-8 text-sm text-zinc-500 dark:text-zinc-400">
       {children}
     </div>
+  );
+}
+
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      className={`h-4 w-4 transition-transform ${open ? "rotate-90" : ""}`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m9 18 6-6-6-6" />
+    </svg>
   );
 }
 
