@@ -5,8 +5,144 @@
  * ``@theme`` blocks below as the SPA grows.
  */
 
+/*
+ * Class-based dark mode. By default Tailwind v4's ``dark:`` variant keys
+ * off ``prefers-color-scheme`` (OS only). Overriding it to match a
+ * ``.dark`` class on any ancestor lets the in-app ThemeToggle drive the
+ * theme manually while still defaulting to the OS preference (see the
+ * inline bootstrap in ``index.html`` and ``lib/theme.ts``).
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Catppuccin theme via token remap.
+ *
+ * Tailwind v4 utilities compile to ``var(--color-<name>-<shade>)``. By
+ * overriding those same variables — Latte under ``:root`` and Mocha under
+ * ``.dark`` — every existing ``zinc-*`` / ``blue-*`` / ``red-*`` / ``amber-*``
+ * class renders in Catppuccin without touching component markup.
+ *
+ * The neutral (``zinc``) ramp is monotonic light->dark, which matches how the
+ * app uses it in both modes: low numbers are light surfaces (light mode) and
+ * light text (dark mode); high numbers are dark text (light mode) and dark
+ * surfaces (dark mode).
+ *
+ * ``--color-white`` is left pure white so ``text-white`` on accent buttons
+ * stays legible. Dark-mode primary buttons use a deepened blue (blue-500..700)
+ * while links/active states keep the pastel Mocha blue (blue-300/400).
+ *
+ * Palette source: https://github.com/catppuccin/catppuccin (Latte + Mocha).
+ */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+
+  /* ---- Latte neutrals (mapped onto the zinc ramp) ---- */
+  --color-zinc-50: #e6e9ef; /* mantle  */
+  --color-zinc-100: #dce0e8; /* crust   */
+  --color-zinc-200: #ccd0da; /* surface0 */
+  --color-zinc-300: #bcc0cc; /* surface1 */
+  --color-zinc-400: #9ca0b0; /* overlay0 */
+  --color-zinc-500: #6c6f85; /* subtext0 */
+  --color-zinc-600: #5c5f77; /* subtext1 */
+  --color-zinc-700: #4c4f69; /* text     */
+  --color-zinc-800: #43465e;
+  --color-zinc-900: #3b3f54;
+  --color-zinc-950: #2f3245;
+
+  /* ---- Latte blue (primary accent) ---- */
+  --color-blue-50: #dce6fd;
+  --color-blue-100: #c5d6fc;
+  --color-blue-200: #9fbcf9;
+  --color-blue-300: #6f9bf6;
+  --color-blue-400: #4a80f3;
+  --color-blue-500: #1e66f5;
+  --color-blue-600: #1e66f5;
+  --color-blue-700: #1a54d6;
+  --color-blue-800: #1746b3;
+  --color-blue-900: #143a92;
+  --color-blue-950: #0a2360;
+
+  /* ---- Latte red ---- */
+  --color-red-50: #fbe2e8;
+  --color-red-100: #f7c9d3;
+  --color-red-200: #f1a3b3;
+  --color-red-300: #e87691;
+  --color-red-400: #de4665;
+  --color-red-500: #d20f39;
+  --color-red-600: #d20f39;
+  --color-red-700: #b00b30;
+  --color-red-800: #8f0a28;
+  --color-red-900: #730820;
+  --color-red-950: #470513;
+
+  /* ---- Latte amber/peach ---- */
+  --color-amber-50: #fdecd9;
+  --color-amber-100: #fbdbb6;
+  --color-amber-200: #f6c179;
+  --color-amber-300: #efa53f;
+  --color-amber-400: #e69a2a;
+  --color-amber-500: #df8e1d;
+  --color-amber-600: #c2790f;
+  --color-amber-700: #9c620c;
+  --color-amber-800: #7e4f0a;
+  --color-amber-900: #663f08;
+  --color-amber-950: #3e2605;
+}
+
+.dark {
+  color-scheme: dark;
+
+  /* ---- Mocha neutrals (mapped onto the zinc ramp) ---- */
+  --color-zinc-50: #cdd6f4; /* text     */
+  --color-zinc-100: #bac2de; /* subtext1 */
+  --color-zinc-200: #a6adc8; /* subtext0 */
+  --color-zinc-300: #9399b2; /* overlay2 */
+  --color-zinc-400: #7f849c; /* overlay1 */
+  --color-zinc-500: #6c7086; /* overlay0 */
+  --color-zinc-600: #585b70; /* surface2 */
+  --color-zinc-700: #45475a; /* surface1 */
+  --color-zinc-800: #313244; /* surface0 */
+  --color-zinc-900: #1e1e2e; /* base     */
+  --color-zinc-950: #11111b; /* crust    */
+
+  /* ---- Mocha blue: pastel for text/links, deepened for buttons ---- */
+  --color-blue-50: #1c2541;
+  --color-blue-100: #24305a;
+  --color-blue-200: #2f4079;
+  --color-blue-300: #b4befe; /* lavender-ish accent text */
+  --color-blue-400: #89b4fa; /* Mocha blue (links/active) */
+  --color-blue-500: #5b8cf0;
+  --color-blue-600: #4f7df0; /* button bg (white text legible) */
+  --color-blue-700: #3f6ae0; /* button hover */
+  --color-blue-800: #34579a;
+  --color-blue-900: #25406e;
+  --color-blue-950: #1a2d4d;
+
+  /* ---- Mocha red ---- */
+  --color-red-50: #3a1722;
+  --color-red-100: #4d1d2c;
+  --color-red-200: #6a2438;
+  --color-red-300: #f38ba8; /* Mocha red (accent text) */
+  --color-red-400: #eb6f92;
+  --color-red-500: #e64d75;
+  --color-red-600: #d83a64;
+  --color-red-700: #b32f52;
+  --color-red-800: #8c2641;
+  --color-red-900: #5a1a2b;
+  --color-red-950: #3a1019;
+
+  /* ---- Mocha amber/peach/yellow ---- */
+  --color-amber-50: #3a2a17;
+  --color-amber-100: #4d3820;
+  --color-amber-200: #6a4f2c;
+  --color-amber-300: #f9e2af; /* Mocha yellow (accent text) */
+  --color-amber-400: #fab387; /* Mocha peach */
+  --color-amber-500: #e8a24f;
+  --color-amber-600: #d18c2f;
+  --color-amber-700: #a86f25;
+  --color-amber-800: #f9e2af; /* warning banner text on dark */
+  --color-amber-900: #5a3f1a;
+  --color-amber-950: #3a2810;
 }
 
 html,

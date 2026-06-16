@@ -53,8 +53,8 @@ class AuthMiddleware(AbstractAuthenticationMiddleware):
 
 
 # Auth-middleware exclusions: ``/metrics`` and the OpenAPI surfaces.
-# The static UI router built by ``ui.build_spa_route_handler`` carries
-# ``opt={"exclude_from_auth": True}`` so the middleware skips it via
+# The SPA handlers built by ``ui.build_spa_route_handler`` each carry
+# ``opt={"exclude_from_auth": True}`` so the middleware skips them via
 # its ``exclude_opt_key`` mechanism — no URL patterns required here.
 auth_mw = DefineMiddleware(
     AuthMiddleware,
@@ -64,7 +64,7 @@ auth_mw = DefineMiddleware(
 
 route_handlers = [PrometheusController, get_config]
 if settings.ui_enabled:
-    route_handlers.append(ui.build_spa_route_handler())
+    route_handlers.extend(ui.build_spa_route_handler())
 
 
 app = Litestar(

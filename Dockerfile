@@ -19,8 +19,11 @@ WORKDIR /ui
 
 # 1. Install JS dependencies in a cached layer keyed on package.json +
 #    pnpm-lock.yaml. The lockfile is committed to the repository, so the
-#    install is unconditional and reproducible.
-COPY ui/package.json ui/pnpm-lock.yaml ./
+#    install is unconditional and reproducible. ``pnpm-workspace.yaml`` is
+#    copied too: it carries the build-script approvals (``allowBuilds``) that
+#    acknowledge ignored postinstall scripts (@scarf/scarf, tree-sitter*,
+#    core-js-pure), without which pnpm 11 aborts with ERR_PNPM_IGNORED_BUILDS.
+COPY ui/package.json ui/pnpm-lock.yaml ui/pnpm-workspace.yaml ./
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 

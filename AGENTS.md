@@ -93,22 +93,25 @@ process will not come up without the database.
 - `update_many` / `delete_many` intentionally raise `ValueError` when the
   resolved `where` condition is `None` (empty filter), to block accidental
   table-wide writes. Don't "fix" this by defaulting to no-op.
-- The bundled React SPA is served by a single Litestar static-files
-  router, wired in `src/fusionserve/ui.py` (`build_spa_route_handler`).
-  The router reads from `src/fusionserve/web/dist` (so the wheel ships
-  built assets), mounts at `Settings.ui_path`, uses `html_mode=True`
-  (serves `index.html` at the mount root and as a fallback for
-  unmatched paths), and carries `opt={"exclude_from_auth": True}` so
-  the auth middleware skips it via its `exclude_opt_key` mechanism —
-  do not add the static URL patterns to `auth_mw.exclude`.
-- There is no separate asset URL setting. Vite is configured with
-  `base: "./"` for builds (see `ui/vite.config.ts`) so the emitted
-  `index.html` references chunks via relative URLs (`./assets/...`).
-  The browser resolves those against the served SPA URL, giving
-  `<ui_path>/assets/<hash>.<ext>`; the same static-files router serves
-  them from `dist/assets/<hash>.<ext>`. This makes the SPA
-  location-independent — relocating it is a one-setting change
-  (`UI_PATH=…`), no JS rebuild required.
+- The bundled React SPA is served by **two** handlers, wired in
+  `src/fusionserve/ui.py` (`build_spa_route_handler`, which returns a
+  sequence — `main.py` does `route_handlers.extend(...)`): (1) an assets
+  static-files router at `<ui_path>assets` serving `dist/assets`
+  (`html_mode=False`), and (2) a base-href-injecting `index.html` handler
+  registered for `<ui_path>` and `<ui_path>{path:path}` (the deep-link
+  fallback under browser-history routing). Both carry
+  `opt={"exclude_from_auth": True}` so the auth middleware skips them via
+  its `exclude_opt_key` mechanism — do not add the URL patterns to
+  `auth_mw.exclude`.
+- There is no separate asset URL setting. Vite builds with `base: "./"`
+  (see `ui/vite.config.ts`) so `index.html` references chunks via relative
+  URLs (`./assets/...`). Because the SPA uses **path routing**, those
+  resolve against the document's `<base href>` — `index.html` ships
+  `<base href="/">` and `_render_index()` rewrites it to `Settings.ui_path`
+  before serving, so chunks resolve to `<ui_path>/assets/<hash>.<ext>` for
+  any route. The SPA reads its router basepath from `document.baseURI`
+  (`ui/src/lib/router.ts`). This keeps the SPA location-independent —
+  relocating it is a one-setting change (`UI_PATH=…`), no JS rebuild.
 - Users land on the SPA via a 302 redirect from `settings.base_path`
   (`/api/`) issued by `fusionserve.ui.RedirectRenderPlugin`. That
   plugin is registered as the first entry of
@@ -135,16 +138,20 @@ process will not come up without the database.
   `http://localhost:5173/` with `server.proxy` forwarding `/api/*`
   requests to the Litestar backend on `:8001` (target hard-coded in
   `ui/vite.config.ts`). Guardrail: `tests/test_ui.py` pins the
-  one-router-at-`ui_path` + `exclude_from_auth=True` shape.
+  assets-router-at-`<ui_path>assets` + index-handler (with `{path:path}`
+  fallback and base-href injection) + `exclude_from_auth=True` shape.
 - REST endpoints are versioned under `<base_path>/v1/<table>` (default
   `/api/v1/<table>`); the same `v1` prefix applies to PG-function
   controllers. The version segment is hard-coded in `fusionserve.rest`;
   bump via a single grep when introducing a `/v2`.
-- The SPA uses **hash routing** (`createHashHistory`) so client-side
-  paths (`/-/#/openapi`, `/-/#/graphql`, …) cannot collide with any
-  future top-level Litestar route. Browser history would also work
-  given the current layout, but hash routing is one fewer thing to
-  reason about.
+- The SPA uses **browser-history (path) routing** (`createBrowserHistory`,
+  `ui/src/lib/router.ts`). Client-side deep links (`<ui_path>data`,
+  `<ui_path>graphql`, …) reload via the index handler's `{path:path}`
+  fallback (dev: Vite's history fallback). The router `basepath` is read
+  from `document.baseURI` (driven by the injected `<base href>`), so no
+  build-time mount constant is needed. Multi-segment SPA paths don't
+  collide with the OpenAPI router's single-segment `<base_path>/{path:str}`
+  not-found handler.
 - The canonical OpenAPI document lives at `/api/openapi.json`,
   auto-registered by Litestar's upstream OpenAPI router: none of the
   configured `render_plugins` (Redirect / Swagger / Scalar) claims that

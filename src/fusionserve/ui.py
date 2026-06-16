@@ -12,17 +12,21 @@ artefacts are exported:
   (default ``/api/-/``) where the SPA is mounted. Sibling render plugins
   (``SwaggerRenderPlugin``, ``ScalarRenderPlugin``) coexist normally at
   ``<base_path>/swagger`` and ``<base_path>/scalar``.
-- :func:`build_spa_route_handler` — returns the
-  :class:`~litestar.router.Router` mounted at :attr:`Settings.ui_path`
-  with ``html_mode=True``. It serves both ``index.html`` (at the mount
-  root and as a fallback for unmatched paths) and the hashed JS/CSS
-  chunks Vite emits, all from the bundle directory
-  ``src/fusionserve/web/dist`` (shipped inside the Python wheel).
-  Because Vite is configured to emit *relative* asset URLs
-  (``./assets/...`` in ``index.html``), the chunks resolve against
-  ``<ui_path>/assets/...`` automatically — no separate asset prefix or
-  second router is needed, and the SPA can be relocated by changing
-  only :attr:`Settings.ui_path`.
+- :func:`build_spa_route_handler` — returns two route handlers serving the
+  SPA under :attr:`Settings.ui_path`:
+
+  * an **assets** static-files router at ``<ui_path>assets`` serving the
+    hashed JS/CSS chunks from ``src/fusionserve/web/dist/assets`` (shipped
+    inside the Python wheel);
+  * a **base-href-injecting index handler** that serves ``index.html`` for
+    the mount root and as the deep-link fallback for any other path under
+    the mount. The SPA uses browser-history (path) routing, so it injects
+    ``<base href="<ui_path>">`` into the served HTML; Vite's *relative*
+    asset URLs (``./assets/...``) then resolve to ``<ui_path>/assets/...``
+    regardless of the current deep route, and the SPA reads its router
+    basepath from ``document.baseURI``. The SPA therefore stays
+    location-independent — relocating it is a single change to
+    :attr:`Settings.ui_path` with no JS rebuild.
 
 The router carries ``opt={"exclude_from_auth": True}`` so the
 authentication middleware (which honours that key via
@@ -40,7 +44,11 @@ Path / routing notes:
   ``{path:str}`` matches a single segment without slashes, so the
   OpenAPI router's auto-registered ``<base_path>/{path:str}`` not-found
   handler does **not** shadow multi-segment paths like ``/api/-/...``;
-  the SPA router's more-specific prefix wins.
+  the SPA handlers' more-specific prefix wins.
+- The index handler is registered for the mount root and a multi-segment
+  ``{path:path}`` catch-all so client-side deep links (e.g.
+  ``/api/-/data/users``) reload to ``index.html``. The more-specific
+  ``<ui_path>assets`` static router wins for asset requests.
 - The trailing-slash form ``<ui_path>`` (e.g. ``/api/-/``) is canonical.
   The slashless ``<base_path>/-`` form is reachable by the OpenAPI
   not-found handler and will 404 — document the trailing slash to users
@@ -49,12 +57,17 @@ Path / routing notes:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from litestar import Response, get
 from litestar.connection import Request
 from litestar.enums import MediaType, OpenAPIMediaType
+from litestar.exceptions import NotFoundException
+from litestar.handlers import HTTPRouteHandler
 from litestar.openapi.plugins import OpenAPIRenderPlugin
 from litestar.response import Redirect
 from litestar.router import Router
@@ -147,49 +160,96 @@ class RedirectRenderPlugin(OpenAPIRenderPlugin):
         return Redirect(path=settings.ui_path, status_code=302, media_type=self.media_type)
 
 
-def build_spa_route_handler() -> Router:
-    """Build the static-files router that serves the React SPA.
+@lru_cache(maxsize=1)
+def _render_index() -> str:
+    """Return ``index.html`` with ``<base href>`` set to :attr:`Settings.ui_path`.
 
-    Returns the :class:`~litestar.router.Router` that serves the entire
-    bundled output directory ``src/fusionserve/web/dist`` (containing
-    ``index.html`` and the ``assets/`` sub-directory with hashed JS/CSS
-    chunks) at :attr:`Settings.ui_path`.
+    The SPA uses browser-history routing, so the served HTML must declare a
+    ``<base href>`` matching the mount path (Vite emits relative
+    ``./assets/...`` URLs that resolve against it). The on-disk file ships a
+    placeholder ``<base href="/">`` (the dev default); here it is rewritten to
+    ``settings.ui_path``.
 
-    Key configuration:
-
-    - ``html_mode=True`` makes Litestar serve ``index.html`` for the
-      mount root and as a fallback for unmatched paths, which gives
-      the SPA's client-side router a no-broken-deep-link guarantee
-      (belt-and-braces alongside the SPA's existing hash routing).
-    - ``opt={"exclude_from_auth": True}`` opts the entire router out
-      of the auth middleware, which honours
-      :attr:`~litestar.middleware.AbstractAuthenticationMiddleware.exclude_opt_key`
-      (set to ``"exclude_from_auth"`` by Litestar's default). Without
-      this, every static asset would trigger an unnecessary
-      authentication round-trip.
-
-    The router serves the chunks too — Vite is configured (in
-    ``ui/vite.config.ts``) to emit relative asset URLs (``./assets/...``
-    in ``index.html``), so the browser resolves them against the served
-    SPA URL (``<ui_path>/assets/<hash>.<ext>``) and the same router
-    maps that to ``<bundle_dir>/assets/<hash>.<ext>`` on disk. No
-    separate asset prefix configuration is required, and relocating
-    the SPA is a one-setting change (override :attr:`Settings.ui_path`).
-
-    The ``settings.ui_enabled`` gate is the caller's responsibility —
-    this function unconditionally builds and returns the router.
+    The result is cached for the process lifetime: the served bundle is only
+    (re)built in CI, never at runtime, and ``settings.ui_path`` is fixed at
+    startup, so the rendered HTML is immutable while the process runs.
+    ``lru_cache`` does not cache exceptions, so a call before the SPA is built
+    raises without poisoning the cache and recovers once the bundle exists.
 
     Returns:
-        A :class:`Router` ready to be added to
+        The rewritten ``index.html`` markup.
+
+    Raises:
+        NotFoundException: If the SPA has not been built (``index.html``
+            missing under the bundle directory).
+    """
+    index_path = _BUNDLE_DIR / "index.html"
+    try:
+        html = index_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise NotFoundException("SPA index.html not found; build the UI first") from exc
+
+    base_tag = f'<base href="{settings.ui_path}" />'
+    if "<base" in html:
+        return re.sub(r"<base\b href=[^>]*>", base_tag, html, count=1)
+    return html.replace("<head>", f"<head>\n    {base_tag}", 1)
+
+
+def _build_index_handler() -> HTTPRouteHandler:
+    """Build the GET handler that serves the SPA shell (with injected base href).
+
+    Registered for the mount root and a multi-segment ``{path:path}``
+    catch-all so client-side deep links reload to ``index.html``. Asset
+    requests are served by the more-specific assets router instead.
+    """
+
+    @get(
+        [settings.ui_path, f"{settings.ui_path}{{path:path}}"],
+        name="ui-index",
+        opt={"exclude_from_auth": True},
+        media_type=MediaType.HTML,
+        include_in_schema=False,
+        sync_to_thread=False,
+    )
+    def serve_spa_index(path: str = "") -> Response[str]:
+        return Response(_render_index(), media_type=MediaType.HTML)
+
+    return serve_spa_index
+
+
+def build_spa_route_handler() -> Sequence[Router | HTTPRouteHandler]:
+    """Build the route handlers that serve the React SPA.
+
+    Returns two handlers, both opted out of the auth middleware via
+    ``opt={"exclude_from_auth": True}`` (honoured through
+    :attr:`~litestar.middleware.AbstractAuthenticationMiddleware.exclude_opt_key`):
+
+    - an **assets** static-files router at ``<ui_path>assets`` serving the
+      hashed chunks from ``<bundle_dir>/assets`` (``html_mode=False`` — only
+      real files; traversal-protected by Litestar);
+    - a **base-href-injecting index handler** (see :func:`_build_index_handler`)
+      serving ``index.html`` for the mount root and as the deep-link fallback.
+
+    Splitting the two (rather than a single ``html_mode=True`` router) is what
+    lets us rewrite ``<base href>`` in the served HTML while still serving the
+    chunks verbatim — so the browser-history SPA resolves relative asset URLs
+    correctly at any depth and the mount stays relocatable via
+    :attr:`Settings.ui_path`.
+
+    The ``settings.ui_enabled`` gate is the caller's responsibility.
+
+    Returns:
+        A sequence of handlers ready to be added to
         :class:`litestar.Litestar`'s ``route_handlers`` list.
     """
-    return create_static_files_router(
-        path=settings.ui_path,
-        directories=[_BUNDLE_DIR],
-        html_mode=True,
-        name="ui",
+    assets_router = create_static_files_router(
+        path=f"{settings.ui_path.rstrip('/')}/assets",
+        directories=[_BUNDLE_DIR / "assets"],
+        html_mode=False,
+        name="ui-assets",
         opt={"exclude_from_auth": True},
     )
+    return (assets_router, _build_index_handler())
 
 
 __all__ = ("RedirectRenderPlugin", "build_spa_route_handler")

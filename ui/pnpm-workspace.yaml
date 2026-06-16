@@ -1,0 +1,13 @@
+# Build-script approvals for transitive dependencies. All are disabled:
+#   - @scarf/scarf            install-time analytics — opted out (see also
+#                             scarfSettings in package.json)
+#   - tree-sitter*, core-js-pure  native/postinstall scripts that are
+#                             irrelevant to the browser bundle Vite produces
+# Setting these to false acknowledges the ignored builds so pnpm does not
+# error (ERR_PNPM_IGNORED_BUILDS) on install / `pnpm run`.
+allowBuilds:
+  '@scarf/scarf': false
+  '@tree-sitter-grammars/tree-sitter-yaml': false
+  core-js-pure: false
+  tree-sitter: false
+  tree-sitter-json: false
