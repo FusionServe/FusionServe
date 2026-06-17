@@ -30,7 +30,7 @@ dependencies = [
     "httpx",
     "importlib-metadata",
     "inflect",
-    "litestar>=2.23.0",
+    "litestar>=2.24.0",
     "odata-query",
     "prometheus_client",
     "psycopg[binary]",
@@ -60,9 +60,9 @@ dev = [
     "mkdocs-material>=9.7.6",
     "mkdocstrings-python>=2.0.4",
     "pre-commit>=4.6.0",
-    "pytest>=9.0.3",
+    "pytest>=9.1.0",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.15.16",
+    "ruff>=0.15.17",
     "testcontainers[postgres]>=4.14.2",
 ]
 
