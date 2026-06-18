@@ -29,7 +29,7 @@ async def lifespan(app: Litestar):
         app.register(controller)
     for controller in rest.build_function_controllers(introspection):
         app.register(controller)
-    
+
     app.register(graphql.build(introspection))
     # ---- file uploads ----
     # The files controller mounts at ``<base_path>/v1/_uploads`` and
