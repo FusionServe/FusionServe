@@ -49,114 +49,122 @@ class SortDirection(Enum):
     DESC_NULLS_LAST = "DESC_NULLS_LAST"
 
 
-@strawberry.input(description="Comparison operators for String columns.")
-class StringComparisonExp:
-    """String comparison operators including pattern matching."""
-
-    eq: str | None = strawberry.UNSET
-    neq: str | None = strawberry.UNSET
-    gt: str | None = strawberry.UNSET
-    gte: str | None = strawberry.UNSET
-    lt: str | None = strawberry.UNSET
-    lte: str | None = strawberry.UNSET
-    in_list: list[str] | None = strawberry.UNSET
-    not_in_list: list[str] | None = strawberry.UNSET
-    like: str | None = strawberry.UNSET
-    ilike: str | None = strawberry.UNSET
-    is_null: bool | None = strawberry.UNSET
-
-
-@strawberry.input(description="Comparison operators for Int columns.")
-class IntComparisonExp:
-    """Integer comparison operators."""
-
-    eq: int | None = strawberry.UNSET
-    neq: int | None = strawberry.UNSET
-    gt: int | None = strawberry.UNSET
-    gte: int | None = strawberry.UNSET
-    lt: int | None = strawberry.UNSET
-    lte: int | None = strawberry.UNSET
-    in_list: list[int] | None = strawberry.UNSET
-    not_in_list: list[int] | None = strawberry.UNSET
-    is_null: bool | None = strawberry.UNSET
+# ---------------------------------------------------------------------------
+# strawberry-orm filter-lookup overrides
+# ---------------------------------------------------------------------------
+#
+# strawberry-orm ships date/time lookup inputs whose operator fields are typed
+# ``str`` (``strawberry_orm.filters.DateTimeComparisonLookup`` et al.) and maps
+# PostgreSQL ``uuid`` columns to ``str`` as well. Because the asyncpg dialect
+# renders explicit bind casts (``$1::TYPE``) and SQLAlchemy derives a bind
+# parameter's type from the *Python value* (``TypeEngine.coerce_compared_value``),
+# a ``str`` value compared against a ``timestamp``/``uuid`` column emits
+# ``col >= $1::VARCHAR`` and PostgreSQL rejects it with e.g.
+# ``operator does not exist: timestamp with time zone >= character varying``.
+#
+# The lookups below mirror the field *names* the SQLAlchemy backend's
+# ``_build_lookup_clauses`` recognises (``exact``/``neq``/``gt``/``gte``/``lt``/
+# ``lte``/``in_list``/``not_in_list``/``is_null``/``range``) but type the value
+# fields concretely, so Strawberry coerces the GraphQL input into real
+# ``datetime``/``date``/``time``/``uuid.UUID`` objects. SQLAlchemy then keeps the
+# column type and renders ``$1::TIMESTAMP``/``$1::UUID``. They are wired in via
+# the backend's public ``filter_overrides`` hook (see :data:`FILTER_OVERRIDES`
+# and ``fusionserve.graphql.build``).
 
 
-@strawberry.input(description="Comparison operators for Float columns.")
-class FloatComparisonExp:
-    """Float comparison operators."""
+@strawberry.input(description="Datetime range (inclusive) for `range` lookups.")
+class DateTimeRangeInput:
+    """Inclusive ``[start, end]`` bounds for a datetime ``range`` lookup."""
 
-    eq: float | None = strawberry.UNSET
-    neq: float | None = strawberry.UNSET
-    gt: float | None = strawberry.UNSET
-    gte: float | None = strawberry.UNSET
-    lt: float | None = strawberry.UNSET
-    lte: float | None = strawberry.UNSET
-    in_list: list[float] | None = strawberry.UNSET
-    not_in_list: list[float] | None = strawberry.UNSET
-    is_null: bool | None = strawberry.UNSET
+    start: datetime.datetime
+    end: datetime.datetime
 
 
-@strawberry.input(description="Comparison operators for Boolean columns.")
-class BooleanComparisonExp:
-    """Boolean comparison operators (only eq and is_null)."""
+@strawberry.input(description="Date range (inclusive) for `range` lookups.")
+class DateRangeInput:
+    """Inclusive ``[start, end]`` bounds for a date ``range`` lookup."""
 
-    eq: bool | None = strawberry.UNSET
-    is_null: bool | None = strawberry.UNSET
+    start: datetime.date
+    end: datetime.date
+
+
+@strawberry.input(description="Time range (inclusive) for `range` lookups.")
+class TimeRangeInput:
+    """Inclusive ``[start, end]`` bounds for a time ``range`` lookup."""
+
+    start: datetime.time
+    end: datetime.time
 
 
 @strawberry.input(description="Comparison operators for DateTime columns.")
-class DateTimeComparisonExp:
-    """DateTime comparison operators."""
+class DateTimeComparisonLookup:
+    """DateTime lookups typed as :class:`datetime.datetime` (not ``str``)."""
 
-    eq: datetime.datetime | None = strawberry.UNSET
+    exact: datetime.datetime | None = strawberry.UNSET
     neq: datetime.datetime | None = strawberry.UNSET
+    is_null: bool | None = strawberry.UNSET
+    in_list: list[datetime.datetime] | None = strawberry.UNSET
+    not_in_list: list[datetime.datetime] | None = strawberry.UNSET
     gt: datetime.datetime | None = strawberry.UNSET
     gte: datetime.datetime | None = strawberry.UNSET
     lt: datetime.datetime | None = strawberry.UNSET
     lte: datetime.datetime | None = strawberry.UNSET
-    in_list: list[datetime.datetime] | None = strawberry.UNSET
-    not_in_list: list[datetime.datetime] | None = strawberry.UNSET
-    is_null: bool | None = strawberry.UNSET
+    range: DateTimeRangeInput | None = strawberry.UNSET
 
 
 @strawberry.input(description="Comparison operators for Date columns.")
-class DateComparisonExp:
-    """Date comparison operators."""
+class DateComparisonLookup:
+    """Date lookups typed as :class:`datetime.date` (not ``str``)."""
 
-    eq: datetime.date | None = strawberry.UNSET
+    exact: datetime.date | None = strawberry.UNSET
     neq: datetime.date | None = strawberry.UNSET
+    is_null: bool | None = strawberry.UNSET
+    in_list: list[datetime.date] | None = strawberry.UNSET
+    not_in_list: list[datetime.date] | None = strawberry.UNSET
     gt: datetime.date | None = strawberry.UNSET
     gte: datetime.date | None = strawberry.UNSET
     lt: datetime.date | None = strawberry.UNSET
     lte: datetime.date | None = strawberry.UNSET
-    in_list: list[datetime.date] | None = strawberry.UNSET
-    not_in_list: list[datetime.date] | None = strawberry.UNSET
+    range: DateRangeInput | None = strawberry.UNSET
+
+
+@strawberry.input(description="Comparison operators for Time columns.")
+class TimeComparisonLookup:
+    """Time lookups typed as :class:`datetime.time` (not ``str``)."""
+
+    exact: datetime.time | None = strawberry.UNSET
+    neq: datetime.time | None = strawberry.UNSET
     is_null: bool | None = strawberry.UNSET
+    gt: datetime.time | None = strawberry.UNSET
+    gte: datetime.time | None = strawberry.UNSET
+    lt: datetime.time | None = strawberry.UNSET
+    lte: datetime.time | None = strawberry.UNSET
+    range: TimeRangeInput | None = strawberry.UNSET
 
 
 @strawberry.input(description="Comparison operators for UUID columns.")
-class UUIDComparisonExp:
-    """UUID comparison operators (no ordering operators)."""
+class UUIDComparisonLookup:
+    """UUID lookups typed as :class:`uuid.UUID` (not ``str``); no ordering."""
 
-    eq: uuid.UUID | None = strawberry.UNSET
+    exact: uuid.UUID | None = strawberry.UNSET
     neq: uuid.UUID | None = strawberry.UNSET
-    gt: uuid.UUID | None = strawberry.UNSET
-    gte: uuid.UUID | None = strawberry.UNSET
-    lt: uuid.UUID | None = strawberry.UNSET
-    lte: uuid.UUID | None = strawberry.UNSET
+    is_null: bool | None = strawberry.UNSET
     in_list: list[uuid.UUID] | None = strawberry.UNSET
     not_in_list: list[uuid.UUID] | None = strawberry.UNSET
-    is_null: bool | None = strawberry.UNSET
 
 
-COMPARISON_TYPE_MAP: dict[type, type] = {
-    str: StringComparisonExp,
-    int: IntComparisonExp,
-    float: FloatComparisonExp,
-    bool: BooleanComparisonExp,
-    datetime.datetime: DateTimeComparisonExp,
-    datetime.date: DateComparisonExp,
-    uuid.UUID: UUIDComparisonExp,
+#: Concrete-typed lookup overrides wired into the strawberry-orm SQLAlchemy
+#: backend via its ``filter_overrides`` hook. Keyed on the column's introspected
+#: Python type. ``uuid.UUID`` only takes effect once non-PK uuid columns
+#: introspect as ``uuid.UUID`` (see the ``_SA_TYPE_MAP`` patch in
+#: ``fusionserve.graphql``); uuid primary keys / FKs route through the backend's
+#: ``ReferenceLookup`` instead and are handled by the ``_coerce_reference_value``
+#: patch there.
+FILTER_OVERRIDES: dict[type, type] = {
+    datetime.datetime: DateTimeComparisonLookup,
+    datetime.date: DateComparisonLookup,
+    datetime.time: TimeComparisonLookup,
+    uuid.UUID: UUIDComparisonLookup,
 }
 
 

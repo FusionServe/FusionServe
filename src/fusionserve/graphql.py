@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import sys
 import types as _types_mod
+import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -59,7 +60,14 @@ from strawberry_orm import StrawberryORM
 from . import auth
 from .config import settings
 from .connections import build_connection_field, materialize
-from .models import FunctionInfo, FunctionReturnKind, Introspection, RecordNotFoundError, SmartComment
+from .models import (
+    FILTER_OVERRIDES,
+    FunctionInfo,
+    FunctionReturnKind,
+    Introspection,
+    RecordNotFoundError,
+    SmartComment,
+)
 from .persistence import async_session, inflect, role_config_statement
 
 _logger = logging.getLogger(settings.app_name)
@@ -220,6 +228,78 @@ def _orm_registry(backend: object, attr: str) -> dict:
     return registry
 
 
+def _patch_strawberry_orm_uuid() -> None:
+    """Make strawberry-orm's SQLAlchemy backend treat PostgreSQL ``uuid`` as UUID.
+
+    The backend hard-codes ``uuid`` columns to ``str`` in two places that its
+    public ``filter_overrides`` hook cannot reach, both of which break uuid
+    filtering under the asyncpg dialect (``uuid = $1::VARCHAR`` →
+    ``operator does not exist: uuid = character varying``):
+
+    * ``_SA_TYPE_MAP["UUID"]`` maps ``uuid`` columns to ``str`` during
+      introspection, so non-PK uuid columns never resolve to a uuid-typed
+      lookup. Repointing it at :class:`uuid.UUID` lets
+      :data:`fusionserve.models.FILTER_OVERRIDES` supply the uuid lookup (and,
+      as a bonus, types uuid mutation-input fields as the UUID scalar — matching
+      the already-uuid output type).
+    * ``_coerce_reference_value`` powers ``ReferenceLookup`` (used for every
+      non-int primary key and uuid FK), coercing values to ``int`` or ``str``
+      only — never ``uuid.UUID``. Wrapping it to try ``int`` → ``uuid.UUID`` →
+      ``str`` fixes the common ``id: {exact: …}`` / ``object.<rel>`` uuid case
+      while staying backward compatible (integer ids still parse first; plain
+      string keys still fall through).
+
+    Both mutations are idempotent and guarded by ``tests/test_graphql_orm_contract.py``
+    so a strawberry-orm upgrade that changes these internals fails loudly.
+
+    Raises:
+        RuntimeError: If either relied-upon symbol is missing from the backend
+            module (signals a breaking strawberry-orm upgrade).
+    """
+    from strawberry_orm.backends import sqlalchemy as _sa_backend
+
+    type_map = getattr(_sa_backend, "_SA_TYPE_MAP", None)
+    if not isinstance(type_map, dict) or "UUID" not in type_map:
+        raise RuntimeError(
+            "strawberry-orm SQLAlchemy backend is missing the private '_SA_TYPE_MAP' "
+            "this build relies on. A strawberry-orm upgrade likely changed its internals "
+            "— update fusionserve.graphql._patch_strawberry_orm_uuid()."
+        )
+    type_map["UUID"] = uuid.UUID
+
+    original = getattr(_sa_backend, "_coerce_reference_value", None)
+    if original is None:
+        raise RuntimeError(
+            "strawberry-orm SQLAlchemy backend is missing the private "
+            "'_coerce_reference_value' this build relies on. A strawberry-orm upgrade "
+            "likely changed its internals — update "
+            "fusionserve.graphql._patch_strawberry_orm_uuid()."
+        )
+    if getattr(original, "_fusionserve_uuid_patched", False):
+        return
+
+    def _coerce_reference_value(val: Any) -> Any:
+        if isinstance(val, list):
+            return [_coerce_reference_value(item) for item in val]
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return val
+        text = str(val)
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            return uuid.UUID(text)
+        except ValueError:
+            return text
+
+    _coerce_reference_value._fusionserve_uuid_patched = True  # type: ignore[attr-defined]
+    _sa_backend._coerce_reference_value = _coerce_reference_value
+
+
+_patch_strawberry_orm_uuid()
+
+
 def _apply_descriptions(gql_type: type, table: Any) -> None:
     """Copy smart-comment text onto the type and its column field descriptions.
 
@@ -354,6 +434,7 @@ def build(introspection: Introspection):
         session_getter=lambda info: info.context.session,
         default_query_limit=settings.default_page_size,
         max_filter_depth=_MAX_WHERE_DEPTH,
+        filter_overrides=FILTER_OVERRIDES,
     )
 
     class Query:
