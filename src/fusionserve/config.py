@@ -5,6 +5,34 @@ from pydantic import BaseModel, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class S3Settings(BaseModel):
+    """Configuration for the S3 storage backend.
+
+    Mapped to ``STORAGE_S3__<FIELD>`` environment variables via the
+    nested-delimiter mechanism in :class:`Settings`.
+
+    Attributes:
+        bucket: Target S3 bucket name. Required when ``storage_backend="s3"``.
+        region: AWS region of the bucket.
+        endpoint_url: Optional custom endpoint URL for S3-compatible backends
+            (MinIO, LocalStack, etc.). When ``None`` the default AWS endpoint
+            for the configured region is used.
+        access_key_id: AWS access key. When ``None`` aioboto3 falls back to
+            the standard credential resolution chain (env vars, IAM role).
+        secret_access_key: AWS secret key. See ``access_key_id``.
+        presign_ttl_seconds: Lifetime (seconds) of the presigned upload
+            and download URLs issued by
+            :class:`fusionserve.storage.s3.S3Backend`.
+    """
+
+    bucket: str = ""
+    region: str = "us-east-1"
+    endpoint_url: str | None = None
+    access_key_id: str | None = None
+    secret_access_key: SecretStr | None = None
+    presign_ttl_seconds: int = 3600
+
+
 class ClaimsMap(BaseModel):
     username: str
     id: str
@@ -57,6 +85,30 @@ class Settings(BaseSettings):
     #: ``/api/-/``). Setting ``UI_PATH=...`` in the environment skips
     #: that derivation and uses the literal verbatim.
     ui_path: str = ""
+
+    # ---- Storage / file uploads ----
+    #: Backend selector. ``"s3"`` resolves to the bundled
+    #: :class:`fusionserve.storage.s3.S3Backend`; ``"azure"`` to the
+    #: :class:`fusionserve.storage.azure.AzureBlobBackend` placeholder.
+    #: Any other value is treated as a dotted import path
+    #: ``"pkg.mod:ClassName"`` and loaded via
+    #: :func:`fusionserve.storage.load_backend`.
+    storage_backend: str = "s3"
+    #: Name of the metadata table (in ``pg_app_schema``) the files
+    #: controller consults. When absent, the files feature is silently
+    #: disabled at startup.
+    storage_metadata_table: str = "uploads"
+    #: Per-file cap (in bytes). Enforced at the ``complete`` step by
+    #: HEAD-ing the uploaded object; oversize objects are deleted and
+    #: rejected. Also bounds the proxy relay when proxying is enabled.
+    storage_max_single_file_bytes: int = 100 * 1024 * 1024
+    #: When true, presigned upload/download URLs handed to clients are
+    #: rewritten to point at FusionServe's own HTTP proxy (see
+    #: :mod:`fusionserve.files.proxy`) instead of the object store, so
+    #: clients never talk to the object store directly. Off by default.
+    storage_proxy_urls: bool = False
+    #: Nested S3 settings (``STORAGE_S3__BUCKET=…`` etc.).
+    storage_s3: S3Settings = S3Settings()
 
     jwt_issuer: str | None = None
     jwks_url: str | None = None
