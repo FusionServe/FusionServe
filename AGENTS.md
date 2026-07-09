@@ -151,15 +151,46 @@ process will not come up without the database.
   underscore namespaces it away from the auto-generated CRUD at
   `<base_path>/v1/uploads`). GraphQL is deliberately untouched — do
   not introduce schema-build branches keyed on the metadata table
-  name; lock writes down via RLS on the operator side. The cascading
-  delete lives at `DELETE /api/v1/_uploads/{id}`; the auto-generated
-  `DELETE /api/v1/uploads/{id}` only removes the metadata row and
-  orphans the blob. Storage backend selection (`STORAGE_BACKEND`)
-  accepts `"filesystem"`, `"s3"`, or a `"pkg.mod:Class"` dotted
-  import path resolved by `fusionserve.storage.load_backend` —
-  custom backends must implement the `StorageBackend` Protocol in
-  `fusionserve.storage.base` and be instantiable with no arguments
-  (read your own settings from `fusionserve.config`).
+  name; lock writes down via RLS on the operator side.
+  - Uploads are **direct-to-store and two-phase**: `POST /_uploads`
+    (init) inserts a `pending` row per file and returns a presigned
+    upload URL (`StorageBackend.generate_upload_url`); the client PUTs
+    bytes straight to the store; `POST /_uploads/{id}/complete` HEADs
+    the object (`stat`), enforces `STORAGE_MAX_SINGLE_FILE_BYTES`
+    (deleting + 413 on breach), and flips the row to `completed` with
+    the verified size/etag. Bytes never pass through the app in this
+    path — do **not** reintroduce a `save`/`open` streaming Protocol.
+  - Download (`GET /_uploads/{id}/content`) always 302-redirects to a
+    presigned GET URL. The cascading delete at `DELETE /_uploads/{id}`
+    removes the blob then the row; the auto-generated
+    `DELETE /api/v1/uploads/{id}` only removes the row and orphans the
+    blob.
+  - The metadata table contract (validated at startup by
+    `files.metadata.validate_uploads_table`) requires `status` and
+    allows `size_bytes`/`etag`/`attributes` to be NULL. The JSONB bag
+    is named `attributes` **not** `metadata` — a column named
+    `metadata` collides with SQLAlchemy's reserved Declarative
+    attribute and breaks automap introspection at startup.
+  - Optional HTTP proxy (`STORAGE_PROXY_URLS=true`,
+    `fusionserve.files.proxy`): the presigned upload/download URLs are
+    origin-swapped to `<base_path>/v1/_uploads/_proxy/...` (path+query
+    preserved so the signature stays valid); the `_proxy` relay
+    handlers reconstruct the target from `StorageBackend.object_origin()`
+    (never from client input — anti-SSRF) and stream via `httpx`. The
+    relay routes carry `opt={"exclude_from_auth": True}` and set a
+    per-handler `request_max_body_size` for uploads — the signed URL is
+    the capability, like a raw presigned URL.
+  - Storage backend selection (`STORAGE_BACKEND`, default `"s3"`)
+    accepts `"s3"`, `"azure"` (an unimplemented placeholder whose
+    methods raise `NotImplementedError`), or a `"pkg.mod:Class"` dotted
+    import path resolved by `fusionserve.storage.load_backend` — custom
+    backends must implement the `StorageBackend` Protocol in
+    `fusionserve.storage.base` (`generate_upload_url`,
+    `generate_download_url`, `stat`, `delete`, `object_origin`) and be
+    instantiable with no arguments (read your own settings from
+    `fusionserve.config`). There is no import-time bucket validation:
+    `S3Backend.__init__` raises if `STORAGE_S3__BUCKET` is unset, which
+    surfaces at lifespan startup only when the feature is active.
 - The SPA uses **hash routing** (`createHashHistory`) so client-side
   paths (`/-/#/openapi`, `/-/#/graphql`, …) cannot collide with any
   future top-level Litestar route. Browser history would also work

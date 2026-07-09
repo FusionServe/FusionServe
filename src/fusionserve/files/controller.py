@@ -4,8 +4,23 @@ Mounted at ``<base_path>/v1/_uploads``. The leading underscore namespaces
 the controller's routes away from the auto-generated CRUD for the
 ``uploads`` table (which lives at ``<base_path>/v1/uploads``). The two
 coexist by design: the auto-generated CRUD exposes the metadata rows,
-and this controller adds the blob-aware operations (multi-file upload,
-streamed download, cascading delete).
+and this controller adds the blob-aware operations.
+
+Uploads are **direct-to-store** and two-phase:
+
+1. ``POST /_uploads`` (*init*) — creates a ``pending`` metadata row per
+   file and returns a presigned upload URL (an :class:`UploadTicket`).
+2. the client uploads the bytes straight to the object store using that
+   URL (or through the proxy — see below).
+3. ``POST /_uploads/{id}/complete`` — the server HEADs the object,
+   enforces the size cap, records the verified size/etag and flips the
+   row to ``completed``.
+
+Downloads issue a 302 to a presigned GET URL. When
+``settings.storage_proxy_urls`` is on, both the upload and download URLs
+are rewritten to point at this controller's ``_proxy`` relay, so clients
+never contact the object store directly (see
+:mod:`fusionserve.files.proxy`).
 """
 
 from __future__ import annotations
@@ -14,16 +29,15 @@ import datetime
 import logging
 import uuid
 from collections.abc import AsyncIterator
-from typing import Annotated, ClassVar
+from typing import Any, ClassVar
 
+import httpx
 import litestar
-from litestar import Request
-from litestar.datastructures import State, UploadFile
-from litestar.enums import RequestEncodingType
+from litestar import Request, Response
+from litestar.datastructures import State
 from litestar.exceptions import ClientException, NotAuthorizedException, NotFoundException
-from litestar.params import Body
 from litestar.response import Redirect, Stream
-from litestar.status_codes import HTTP_207_MULTI_STATUS
+from litestar.status_codes import HTTP_201_CREATED
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeMeta
@@ -33,11 +47,12 @@ from ..config import settings
 from ..persistence import set_role
 from ..storage import StorageBackend
 from .keys import make_storage_key
+from .proxy import build_target_url, rewrite_to_proxy
 
 _logger = logging.getLogger(settings.app_name)
 
-# Chunk size used when relaying the request body to the storage backend.
-_UPLOAD_CHUNK_SIZE = 64 * 1024
+# Chunk size used when relaying bytes to/from the object store.
+_RELAY_CHUNK_SIZE = 64 * 1024
 
 
 class UploadModel(BaseModel):
@@ -52,89 +67,71 @@ class UploadModel(BaseModel):
     id: uuid.UUID
     filename: str
     content_type: str
-    size_bytes: int
+    size_bytes: int | None = None
     storage_key: str
     storage_backend: str
+    status: str
+    etag: str | None = None
+    attributes: dict[str, Any] | None = None
     uploaded_by: uuid.UUID | None = None
     uploaded_at: datetime.datetime
 
 
-class UploadItem(BaseModel):
-    """One entry in the multi-file upload response.
+class InitUploadFile(BaseModel):
+    """One file descriptor in an upload-init request.
 
     Attributes:
-        status: ``"ok"`` when the file was persisted, ``"error"`` when it
-            was rejected (e.g. exceeded the per-file size cap). The
-            request as a whole still returns 207 in the latter case so
-            partially-successful batches can be inspected by the client.
-        filename: Original client-supplied filename (always populated so
-            clients can correlate failed parts).
-        upload: Populated when ``status == "ok"``.
-        error: Populated when ``status == "error"``.
+        filename: Original client filename (stored for display only; the
+            storage key is always server-generated).
+        content_type: MIME type the object will be stored with. Bound
+            into the presigned URL, so the client must upload with a
+            matching ``Content-Type`` header.
+        attributes: Optional arbitrary JSON metadata stored alongside the
+            row. May be overridden at complete time.
     """
 
-    model_config = ConfigDict(from_attributes=True)
-
-    status: str
     filename: str
-    upload: UploadModel | None = None
-    error: str | None = None
+    content_type: str = "application/octet-stream"
+    attributes: dict[str, Any] | None = None
 
 
-class UploadBatchResponse(BaseModel):
-    """Wrapper returned by ``POST /api/v1/_uploads``.
+class InitUploadRequest(BaseModel):
+    """Body of ``POST /_uploads``: one or more files to authorize."""
 
-    Always carries an ``items`` array, even for single-file uploads,
+    files: list[InitUploadFile] = Field(default_factory=list)
+
+
+class UploadTicketItem(BaseModel):
+    """One entry in the init response: a pending row plus its upload URL."""
+
+    id: uuid.UUID
+    filename: str
+    storage_key: str
+    upload_url: str
+    method: str
+    headers: dict[str, str]
+    expires_at: datetime.datetime
+
+
+class InitBatchResponse(BaseModel):
+    """Wrapper returned by ``POST /_uploads``.
+
+    Always carries an ``items`` array, even for single-file requests,
     keeping the response shape predictable for clients.
     """
 
-    items: list[UploadItem] = Field(default_factory=list)
+    items: list[UploadTicketItem] = Field(default_factory=list)
 
 
-async def _stream_to_backend(
-    file: UploadFile,
-    *,
-    storage: StorageBackend,
-    key: str,
-    max_bytes: int,
-) -> int:
-    """Pipe ``file`` into ``storage.save``, enforcing the per-file cap.
+class CompleteUploadRequest(BaseModel):
+    """Optional body of ``POST /_uploads/{id}/complete``.
 
-    Returns the number of bytes written. Raises :class:`ClientException`
-    with HTTP 413 semantics when the file exceeds ``max_bytes``.
+    Attributes:
+        attributes: When provided, overwrites the row's ``attributes``
+            JSONB bag. Omit (or send no body) to keep the init-time value.
     """
-    total = 0
-    oversize = False
 
-    async def _iter() -> AsyncIterator[bytes]:
-        nonlocal total, oversize
-        while True:
-            chunk = await file.read(_UPLOAD_CHUNK_SIZE)
-            if not chunk:
-                return
-            total += len(chunk)
-            if total > max_bytes:
-                oversize = True
-                return
-            yield chunk
-
-    obj = await storage.save(
-        key,
-        _iter(),
-        content_type=file.content_type or "application/octet-stream",
-        declared_size=None,
-    )
-    if oversize:
-        # Clean up partial upload — best-effort.
-        try:
-            await storage.delete(key)
-        except Exception:
-            _logger.warning("Failed to delete partial upload at %s after size-limit breach", key, exc_info=True)
-        raise ClientException(
-            status_code=413,
-            detail=f"file {file.filename!r} exceeds per-file size limit of {max_bytes} bytes",
-        )
-    return obj.size_bytes
+    attributes: dict[str, Any] | None = None
 
 
 def build_controller(
@@ -157,91 +154,128 @@ def build_controller(
     max_single_file = settings.storage_max_single_file_bytes
     presign_ttl = settings.storage_s3.presign_ttl_seconds
 
+    def _maybe_proxy(url: str, request: Request[Any, Any, Any]) -> str:
+        if settings.storage_proxy_urls:
+            return rewrite_to_proxy(url, request_base_url=str(request.base_url))
+        return url
+
     class FilesController(litestar.Controller):
-        """Auto-built controller for multi-file uploads and downloads."""
+        """Auto-built controller for direct-to-store uploads and downloads."""
 
         path = f"{settings.base_path}/v1/_uploads"
         tags: ClassVar[list[str]] = ["files: uploads"]
 
         @litestar.post(
-            summary="Upload one or more files",
+            summary="Initiate one or more direct uploads",
             description=(
-                "Upload one or more files via ``multipart/form-data``. "
-                "Each file part becomes a row in the uploads metadata "
-                "table and a blob in the configured storage backend. "
-                "Per-file errors do not abort the batch — inspect "
-                "``items[*].status``."
+                "Create a ``pending`` metadata row for each file and "
+                "return a presigned upload URL. The client uploads the "
+                "bytes directly to the returned ``upload_url`` (sending "
+                "the returned ``headers``), then calls "
+                "``POST /_uploads/{id}/complete``."
             ),
             security=[{"BearerToken": []}],
-            status_code=HTTP_207_MULTI_STATUS,
+            status_code=HTTP_201_CREATED,
         )
-        async def upload(
+        async def init(
             self,
             session: AsyncSession,
             request: Request[auth.User, str, State],
-            data: Annotated[list[UploadFile], Body(media_type=RequestEncodingType.MULTI_PART)],
-        ) -> UploadBatchResponse:
-            """Persist each part to storage and metadata."""
+            data: InitUploadRequest,
+        ) -> InitBatchResponse:
+            """Sign an upload URL and persist a pending row per file."""
             if request.user is None:
                 raise NotAuthorizedException("Authentication required to upload files")
-            if not data:
+            if not data.files:
                 raise ClientException("no files in request")
             await set_role(session, request.user)
-            items: list[UploadItem] = []
-            for file in data:
-                filename = file.filename or "unnamed"
+            items: list[UploadTicketItem] = []
+            for file in data.files:
                 content_type = file.content_type or "application/octet-stream"
                 key = make_storage_key(content_type)
-                try:
-                    size_bytes = await _stream_to_backend(
-                        file,
-                        storage=storage,
-                        key=key,
-                        max_bytes=max_single_file,
-                    )
-                except ClientException as exc:
-                    items.append(UploadItem(status="error", filename=filename, error=str(exc.detail)))
-                    continue
-                except Exception as exc:
-                    _logger.exception("Storage backend failed for %r", filename)
-                    items.append(UploadItem(status="error", filename=filename, error=f"storage error: {exc}"))
-                    continue
-
+                ticket = await storage.generate_upload_url(key, content_type=content_type, expires_in=presign_ttl)
                 row = orm_class(
-                    filename=filename,
+                    filename=file.filename,
                     content_type=content_type,
-                    size_bytes=size_bytes,
+                    size_bytes=None,
                     storage_key=key,
                     storage_backend=backend_name,
+                    status="pending",
+                    attributes=file.attributes,
                     uploaded_by=request.user.id,
                 )
                 session.add(row)
-                try:
-                    await session.flush()
-                except Exception as exc:
-                    _logger.exception("Failed to record upload metadata for %r", filename)
-                    await session.rollback()
-                    # Reapply role since rollback resets per-session config.
-                    await set_role(session, request.user)
-                    try:
-                        await storage.delete(key)
-                    except Exception:
-                        _logger.warning("Failed to delete orphaned blob %s after DB error", key, exc_info=True)
-                    items.append(UploadItem(status="error", filename=filename, error=f"database error: {exc}"))
-                    continue
-                items.append(UploadItem(status="ok", filename=filename, upload=UploadModel.model_validate(row)))
+                await session.flush()
+                items.append(
+                    UploadTicketItem(
+                        id=row.id,
+                        filename=file.filename,
+                        storage_key=key,
+                        upload_url=_maybe_proxy(ticket.url, request),
+                        method=ticket.method,
+                        headers=ticket.headers,
+                        expires_at=ticket.expires_at,
+                    )
+                )
             await session.commit()
-            return UploadBatchResponse(items=items)
+            return InitBatchResponse(items=items)
+
+        @litestar.post(
+            path="/{id:uuid}/complete",
+            summary="Finalize a previously-initiated upload",
+            description=(
+                "Verify the object exists in the backend, enforce the "
+                "per-file size limit, record the verified size/etag and "
+                "mark the row ``completed``. Optionally overwrite the "
+                "``attributes`` JSONB bag."
+            ),
+            security=[{"BearerToken": []}],
+            raises=[NotFoundException],
+        )
+        async def complete(
+            self,
+            session: AsyncSession,
+            request: Request[auth.User, str, State],
+            id: uuid.UUID,
+            data: CompleteUploadRequest | None = None,
+        ) -> UploadModel:
+            """HEAD-verify the object and flip the row to ``completed``."""
+            if request.user is None:
+                raise NotAuthorizedException("Authentication required to complete uploads")
+            await set_role(session, request.user)
+            row = await session.get(orm_class, {"id": id})
+            if row is None:
+                raise NotFoundException(f"No upload with id {id}")
+            try:
+                stat = await storage.stat(row.storage_key)
+            except FileNotFoundError as exc:
+                raise ClientException(
+                    status_code=409,
+                    detail="object has not been uploaded to storage yet",
+                ) from exc
+            if stat.size_bytes > max_single_file:
+                await storage.delete(row.storage_key)
+                await session.delete(row)
+                await session.commit()
+                raise ClientException(
+                    status_code=413,
+                    detail=f"uploaded object exceeds per-file size limit of {max_single_file} bytes",
+                )
+            row.size_bytes = stat.size_bytes
+            row.etag = stat.etag
+            row.status = "completed"
+            if data is not None and data.attributes is not None:
+                row.attributes = data.attributes
+            await session.commit()
+            return UploadModel.model_validate(row)
 
         @litestar.get(
             path="/{id:uuid}/content",
             summary="Download a previously-uploaded file",
             description=(
-                "Stream the file's bytes through the application by "
-                "default. Pass ``?redirect=1`` to receive a 302 to a "
-                "backend-issued presigned URL when the backend supports "
-                "it; backends without presigning (e.g. filesystem) "
-                "fall back to streaming."
+                "Return a 302 redirect to a presigned GET URL. When "
+                "URL-proxying is enabled the redirect points at the "
+                "``_proxy`` relay instead of the object store."
             ),
             security=[{"BearerToken": []}],
             raises=[NotFoundException],
@@ -251,37 +285,16 @@ def build_controller(
             session: AsyncSession,
             request: Request[auth.User, str, State],
             id: uuid.UUID,
-            redirect: bool = False,
-        ) -> Stream | Redirect:
-            """Return the file contents (stream) or a presigned redirect."""
+        ) -> Redirect:
+            """Redirect to a presigned (or proxied) download URL."""
+            if request.user is None:
+                raise NotAuthorizedException("Authentication required to download files")
             await set_role(session, request.user)
             row = await session.get(orm_class, {"id": id})
             if row is None:
                 raise NotFoundException(f"No upload with id {id}")
-            key = row.storage_key
-            content_type = row.content_type
-            filename = row.filename
-
-            if redirect:
-                url = await storage.presigned_url(key, expires_in=presign_ttl)
-                if url is not None:
-                    return Redirect(path=url)
-
-            try:
-                stat = await storage.stat(key)
-            except FileNotFoundError as exc:
-                raise NotFoundException(f"Blob for upload {id} not found in backend") from exc
-
-            async def _body() -> AsyncIterator[bytes]:
-                async with storage.open(key) as chunks:
-                    async for chunk in chunks:
-                        yield chunk
-
-            headers = {
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "Content-Length": str(stat.size_bytes),
-            }
-            return Stream(_body(), media_type=content_type, headers=headers)
+            url = await storage.generate_download_url(row.storage_key, expires_in=presign_ttl)
+            return Redirect(path=_maybe_proxy(url, request), status_code=302)
 
         @litestar.delete(
             path="/{id:uuid}",
@@ -313,7 +326,91 @@ def build_controller(
             await session.delete(row)
             await session.commit()
 
+        # ---- Optional HTTP proxy relay ---------------------------------
+        # These routes reconstruct the object-store URL from the backend's
+        # own origin (never from client input) and relay the request. They
+        # are unauthenticated: the presigned signature in the query string
+        # is the capability, exactly like a raw presigned URL.
+
+        @litestar.put(
+            path="/_proxy/{s3path:path}",
+            summary="Relay a direct upload to the object store",
+            include_in_schema=False,
+            opt={"exclude_from_auth": True},
+            request_max_body_size=max_single_file,
+        )
+        async def proxy_upload(
+            self,
+            request: Request[Any, Any, State],
+            s3path: str,
+        ) -> Response[bytes]:
+            """Stream the request body to the presigned object-store URL."""
+            origin = await storage.object_origin()
+            target = build_target_url(origin, s3path, request.url.query)
+            headers: dict[str, str] = {}
+            content_type = request.headers.get("content-type")
+            if content_type:
+                headers["Content-Type"] = content_type
+
+            async def _body() -> AsyncIterator[bytes]:
+                async for chunk in request.stream():
+                    if chunk:
+                        yield chunk
+
+            async with httpx.AsyncClient(timeout=None) as client:
+                upstream = await client.request("PUT", target, content=_body(), headers=headers)
+            resp_headers = {}
+            if "etag" in upstream.headers:
+                resp_headers["ETag"] = upstream.headers["etag"]
+            return Response(content=b"", status_code=upstream.status_code, headers=resp_headers)
+
+        @litestar.get(
+            path="/_proxy/{s3path:path}",
+            summary="Relay a download from the object store",
+            include_in_schema=False,
+            opt={"exclude_from_auth": True},
+        )
+        async def proxy_download(
+            self,
+            request: Request[Any, Any, State],
+            s3path: str,
+        ) -> Stream:
+            """Stream the object-store response back to the client."""
+            origin = await storage.object_origin()
+            target = build_target_url(origin, s3path, request.url.query)
+            client = httpx.AsyncClient(timeout=None)
+            upstream = await client.send(client.build_request("GET", target), stream=True)
+            if upstream.status_code >= 400:
+                await upstream.aread()
+                await upstream.aclose()
+                await client.aclose()
+                raise NotFoundException("object not found")
+
+            forwarded = {}
+            for header in ("content-length", "etag", "content-disposition"):
+                if header in upstream.headers:
+                    forwarded[header] = upstream.headers[header]
+            media_type = upstream.headers.get("content-type", "application/octet-stream")
+
+            async def _body() -> AsyncIterator[bytes]:
+                try:
+                    async for chunk in upstream.aiter_bytes(_RELAY_CHUNK_SIZE):
+                        yield chunk
+                finally:
+                    await upstream.aclose()
+                    await client.aclose()
+
+            return Stream(_body(), media_type=media_type, headers=forwarded)
+
     return FilesController
 
 
-__all__ = ["UploadBatchResponse", "UploadItem", "UploadModel", "build_controller"]
+__all__ = [
+    "CompleteUploadRequest",
+    "InitBatchResponse",
+    "InitUploadFile",
+    "InitUploadRequest",
+    "UploadModel",
+    "UploadTicketItem",
+    "build_controller",
+]

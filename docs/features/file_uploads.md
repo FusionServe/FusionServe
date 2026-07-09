@@ -2,11 +2,13 @@
 
 ## Overview
 
-FusionServe exposes a generic file-upload feature over REST. Blobs are
-persisted by a pluggable **storage backend** (local filesystem or S3 by
-default; custom backends plug in via a dotted import path) and the
-per-file metadata lives in a conventional table in your application
-schema. Multi-file uploads are supported in a single request.
+FusionServe exposes a generic file-upload feature over REST built around
+**direct-to-store** transfers: object bytes never pass through the
+application in the normal flow. The server issues a short-lived
+**presigned URL** and the client uploads/downloads straight to/from the
+object store (S3 by default; custom backends plug in via a dotted import
+path). Per-file metadata lives in a conventional table in your
+application schema.
 
 The feature **opts in** automatically when an operator-supplied
 `uploads` table is present in `pg_app_schema`; otherwise the relevant
@@ -23,15 +25,46 @@ underscore namespaces these routes away from the auto-generated REST
 CRUD that introspection produces at `/api/v1/uploads` for the metadata
 table — the two coexist.
 
+Uploads are **two-phase**:
+
 ```
-client ── multipart/form-data ──▶ POST /api/v1/_uploads
-                                    │
-                                    ├─▶ StorageBackend.save(...)   ──▶ filesystem / S3 / custom
-                                    └─▶ INSERT INTO app_public.uploads
+1. POST /api/v1/_uploads            ── init ──▶  INSERT pending row
+                                                 StorageBackend.generate_upload_url()
+   ◀── { items: [ { id, upload_url, method, headers, ... } ] }
+
+2. client ── PUT bytes ──▶ upload_url (object store, directly)
+
+3. POST /api/v1/_uploads/{id}/complete ── HEAD object, enforce size ──▶
+                                          UPDATE row SET size/etag, status='completed'
 ```
 
-The blob keys are **server-generated** (`YYYY/MM/DD/<uuid4><ext>`);
-clients never get to choose the path under which their bytes end up.
+Downloads issue a **302 redirect** to a presigned GET URL. The blob keys
+are **server-generated** (`YYYY/MM/DD/<uuid4><ext>`); clients never get
+to choose the path under which their bytes end up.
+
+### Optional HTTP proxy
+
+When `STORAGE_PROXY_URLS=true`, the `upload_url` returned by *init* and
+the redirect target of *download* are **origin-swapped**: the object
+store's `scheme://host` is replaced with FusionServe's own base plus a
+`_proxy` path prefix, while the path and query (which carry the
+`X-Amz-*` signature) are preserved verbatim. The client hits that URL
+and FusionServe relays the request/response to the real object store, so
+**clients never contact the object store directly** — useful when the
+store is on a private network or blocked by client-side egress policy.
+
+```
+client ── PUT ──▶ /api/v1/_uploads/_proxy/<key>?X-Amz-...  ── relay ──▶ S3
+client ── GET ──▶ /api/v1/_uploads/_proxy/<key>?X-Amz-...  ◀── stream ── S3
+```
+
+The relay reconstructs the object-store URL solely from the backend's
+own origin (never from client input), so it cannot be pointed at an
+arbitrary host. The relay routes are **unauthenticated**: the presigned
+signature in the query string is the capability, exactly like a raw
+presigned URL. Note the literal origin-swap leaves the `X-Amz-Credential`
+query parameter (access-key-id + region) visible to the client; if that
+is unacceptable, front the store with a backend that re-signs opaquely.
 
 ---
 
@@ -45,9 +78,12 @@ CREATE TABLE app_public.uploads (
     id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     filename        text NOT NULL,
     content_type    text NOT NULL,
-    size_bytes      bigint NOT NULL CHECK (size_bytes >= 0),
+    size_bytes      bigint CHECK (size_bytes >= 0),   -- NULL until completed
     storage_key     text NOT NULL UNIQUE,
     storage_backend text NOT NULL,
+    status          text NOT NULL DEFAULT 'pending',  -- 'pending' | 'completed'
+    etag            text,                             -- filled at complete
+    attributes      jsonb,                            -- optional client metadata
     uploaded_by     uuid REFERENCES app_public.users(id),
     uploaded_at     timestamptz NOT NULL DEFAULT now()
 );
@@ -55,40 +91,44 @@ CREATE TABLE app_public.uploads (
 
 `fusionserve.files.metadata.validate_uploads_table` checks this
 contract at lifespan startup and fails loudly if columns or types
-diverge.
+diverge. `size_bytes`, `etag` and `attributes` may be `NULL`; every
+other column must be `NOT NULL` (except `uploaded_by`).
+
+!!! note "Why `attributes`, not `metadata`?"
+    The JSONB bag is called `attributes` on purpose: a column literally
+    named `metadata` collides with SQLAlchemy's reserved Declarative
+    attribute and would break introspection at startup.
 
 !!! warning "Lock the auto-generated CRUD down"
     The same `uploads` table is also exposed by FusionServe's
     introspection-driven REST **and GraphQL** surfaces as a generic
-    resource at `/api/v1/uploads` and through the GraphQL CRUD
-    mutations. Both allow direct writes to columns like `storage_key`
-    and `size_bytes`, which would let a client mint metadata rows that
-    do not match any real blob. **Restrict access via PostgreSQL row-
-    level security and column-level `GRANT`s**: typically revoke
-    `INSERT`, `UPDATE`, and (if orphan-blob risk is unacceptable)
-    `DELETE` on `app_public.uploads` from your application roles, and
-    only allow these via the specialized controller running under a
-    privileged role.
+    resource at `/api/v1/uploads` (including the `attributes` column).
+    Both allow direct writes to columns like `storage_key`, `size_bytes`
+    and `status`, which would let a client mint metadata rows that do not
+    match any real blob. **Restrict access via PostgreSQL row-level
+    security and column-level `GRANT`s**: typically revoke `INSERT`,
+    `UPDATE`, and (if orphan-blob risk is unacceptable) `DELETE` on
+    `app_public.uploads` from your application roles, and only allow
+    these via the specialized controller running under a privileged role.
 
 ---
 
 ## Configuration
 
 ```bash
-# Backend selector. Built-in values: "filesystem", "s3".
+# Backend selector. Built-in values: "s3", "azure" (placeholder).
 # Any other value is treated as a dotted "pkg.mod:Class" import path.
-STORAGE_BACKEND=filesystem
+STORAGE_BACKEND=s3
 
 # Name of the metadata table. The feature gracefully disables when
 # absent.
 STORAGE_METADATA_TABLE=uploads
 
-# Size limits.
-STORAGE_MAX_TOTAL_BYTES=524288000        # 500 MiB aggregate per request
+# Per-file cap (bytes), enforced at the /complete step.
 STORAGE_MAX_SINGLE_FILE_BYTES=104857600  # 100 MiB per file
 
-# --- filesystem backend ---
-STORAGE_FS_ROOT=/var/lib/fusionserve/uploads
+# Route presigned URLs through FusionServe's HTTP proxy (default off).
+STORAGE_PROXY_URLS=false
 
 # --- s3 backend ---
 STORAGE_S3__BUCKET=fusionserve-uploads
@@ -98,6 +138,7 @@ STORAGE_S3__ENDPOINT_URL=
 # Optional; otherwise the standard AWS credential chain (env, IAM role) is used:
 STORAGE_S3__ACCESS_KEY_ID=
 STORAGE_S3__SECRET_ACCESS_KEY=
+# TTL applied to both upload and download presigned URLs:
 STORAGE_S3__PRESIGN_TTL_SECONDS=3600
 ```
 
@@ -106,6 +147,9 @@ S3 client requests are issued with
 `response_checksum_validation="when_required"` to remain compatible
 with S3-compatible backends (MinIO, LocalStack, older R2 versions) that
 do not understand the new botocore default of CRC32 trailer checksums.
+Deployments using `STORAGE_S3__ENDPOINT_URL` (MinIO/LocalStack) are the
+exact/robust case for the proxy, since the origin is taken verbatim from
+the endpoint.
 
 ---
 
@@ -113,62 +157,63 @@ do not understand the new botocore default of CRC32 trailer checksums.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST`   | `/api/v1/_uploads`              | Multipart upload, one or more `file` parts. Returns 207 with a per-file status array. |
-| `GET`    | `/api/v1/_uploads/{id}/content` | Stream the blob. `?redirect=1` returns 302 to a presigned URL when the backend supports it. |
+| `POST`   | `/api/v1/_uploads`              | Initiate uploads. Body `{files:[{filename, content_type?, attributes?}]}`. Returns 201 with one `items[*]` ticket per file. |
+| `POST`   | `/api/v1/_uploads/{id}/complete`| Finalize: verify the object, record size/etag, mark `completed`. Optional body `{attributes}` overwrites the JSONB bag. |
+| `GET`    | `/api/v1/_uploads/{id}/content` | 302 redirect to a presigned GET URL (or its proxied form). |
 | `DELETE` | `/api/v1/_uploads/{id}`         | Cascading delete: blob first, then metadata row. |
+| `PUT`/`GET` | `/api/v1/_uploads/_proxy/{path}` | Internal relay used only when `STORAGE_PROXY_URLS=true`; not called directly. |
 
-### Upload
+### Upload (two-phase)
 
 ```bash
+# 1. Initiate — get a presigned URL + a pending row id.
 curl -X POST http://localhost:8001/api/v1/_uploads \
   -H "Authorization: Bearer $TOKEN" \
-  -F "data=@./report.pdf" \
-  -F "data=@./logo.png"
+  -H "Content-Type: application/json" \
+  -d '{"files":[{"filename":"report.pdf","content_type":"application/pdf","attributes":{"project":"acme"}}]}'
 ```
 
-Response (`HTTP 207 Multi-Status`):
+Response (`HTTP 201`):
 
 ```json
 {
   "items": [
     {
-      "status": "ok",
+      "id": "8c5b6e54-...",
       "filename": "report.pdf",
-      "upload": {
-        "id": "8c5b6e54-...",
-        "filename": "report.pdf",
-        "content_type": "application/pdf",
-        "size_bytes": 124356,
-        "storage_key": "2026/05/19/8c5b6e54...pdf",
-        "storage_backend": "FilesystemBackend",
-        "uploaded_by": "f81d0e0c-...",
-        "uploaded_at": "2026-05-19T13:42:09Z"
-      }
-    },
-    { "status": "ok", "filename": "logo.png", "upload": { "..." : "..." } }
+      "storage_key": "2026/05/19/8c5b6e54....pdf",
+      "upload_url": "https://bucket.s3.eu-central-1.amazonaws.com/2026/05/19/8c5b6e54....pdf?X-Amz-...",
+      "method": "PUT",
+      "headers": { "Content-Type": "application/pdf" },
+      "expires_at": "2026-05-19T14:42:09Z"
+    }
   ]
 }
 ```
 
-**Partial failures** (e.g. one file exceeds
-`STORAGE_MAX_SINGLE_FILE_BYTES`) produce an `error` entry in the same
-response — already-succeeded files are not rolled back. Clients are
-expected to retry only the failed parts.
+```bash
+# 2. Upload the bytes directly to the object store (send the headers).
+curl -X PUT "$UPLOAD_URL" -H "Content-Type: application/pdf" --data-binary @./report.pdf
+
+# 3. Finalize — the server verifies and records the real size/etag.
+curl -X POST http://localhost:8001/api/v1/_uploads/8c5b6e54-.../complete \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+`complete` returns the finalized metadata row. It responds `409` if the
+object is not present in the store yet, and `413` (deleting the blob and
+row) if the uploaded object exceeds `STORAGE_MAX_SINGLE_FILE_BYTES`.
 
 ### Download
 
 ```bash
-# Stream the bytes through FusionServe.
-curl http://localhost:8001/api/v1/_uploads/8c5b6e54-.../content \
-     -H "Authorization: Bearer $TOKEN" -o report.pdf
-
-# Bypass the server bandwidth (S3 only): get a presigned URL via 302.
-curl -L http://localhost:8001/api/v1/_uploads/8c5b6e54-.../content?redirect=1 \
+curl -L http://localhost:8001/api/v1/_uploads/8c5b6e54-.../content \
      -H "Authorization: Bearer $TOKEN" -o report.pdf
 ```
 
-The filesystem backend ignores `?redirect=1` and falls back to
-streaming.
+The endpoint 302-redirects to a presigned GET URL. With
+`STORAGE_PROXY_URLS=true` the redirect points at the `_proxy` relay and
+the bytes stream back through FusionServe.
 
 ### Delete
 
@@ -179,11 +224,10 @@ curl -X DELETE http://localhost:8001/api/v1/_uploads/8c5b6e54-... \
 
 Returns `204 No Content`. The blob is removed from the backend **before**
 the SQL row is deleted; a backend error aborts the entire operation
-(no orphan rows).
-
-The auto-generated `DELETE /api/v1/uploads/{id}` will also delete the
-metadata row but does **not** touch the backend — use the controller
-endpoint above unless you have a deliberate reason to orphan the blob.
+(no orphan rows). The auto-generated `DELETE /api/v1/uploads/{id}` will
+also delete the metadata row but does **not** touch the backend — use
+the controller endpoint above unless you have a deliberate reason to
+orphan the blob.
 
 ---
 
@@ -194,26 +238,21 @@ Subclass nothing — implement the
 
 ```python
 # mypkg/storage.py
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import datetime
 
-from fusionserve.storage.base import StorageObject
+from fusionserve.storage.base import StorageObject, UploadTicket
 
 
 class MyBackend:
-    async def save(self, key, stream, *, content_type, declared_size):
+    async def generate_upload_url(self, key, *, content_type, expires_in) -> UploadTicket:
         ...
-        return StorageObject(key=key, size_bytes=size, content_type=content_type)
+        return UploadTicket(url=url, method="PUT", headers={"Content-Type": content_type},
+                            expires_at=datetime.datetime.now(datetime.UTC))
 
-    @asynccontextmanager
-    async def open(self, key):
-        async def _iter():
-            yield ...
-        yield _iter()
-
-    async def delete(self, key): ...
-    async def stat(self, key): ...
-    async def presigned_url(self, key, *, expires_in): return None
+    async def generate_download_url(self, key, *, expires_in) -> str: ...
+    async def stat(self, key) -> StorageObject: ...
+    async def delete(self, key) -> None: ...
+    async def object_origin(self) -> str: ...  # scheme://host presigned URLs use
 ```
 
 Point FusionServe at it via the dotted import-path syntax:
@@ -226,6 +265,11 @@ STORAGE_BACKEND=mypkg.storage:MyBackend
 the class with no arguments (read your own settings from
 `fusionserve.config`), and verifies the result satisfies the protocol.
 
+The bundled `azure` selector resolves to
+`fusionserve.storage.azure.AzureBlobBackend`, a **placeholder** whose
+methods raise `NotImplementedError`; it reserves the name for a future
+SAS-based implementation.
+
 ---
 
 ## What's not in v1
@@ -237,3 +281,5 @@ the class with no arguments (read your own settings from
 - **Per-upload destination override** (client-chosen bucket/folder):
   destination is fully config-driven.
 - **Image processing / virus scanning hooks**: out of scope.
+- **Server-side buffered uploads**: bytes only ever pass through the
+  app via the optional relay proxy; there is no multipart-to-disk path.

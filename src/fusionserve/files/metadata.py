@@ -21,7 +21,7 @@ _logger = logging.getLogger(settings.app_name)
 
 
 #: Required column → Python type. Nullability is enforced separately
-#: below (only ``uploaded_by`` is allowed to be nullable).
+#: below (see ``_NULLABLE_ALLOWED``).
 _REQUIRED_COLUMNS: dict[str, type] = {
     "id": uuid.UUID,
     "filename": str,
@@ -29,12 +29,17 @@ _REQUIRED_COLUMNS: dict[str, type] = {
     "size_bytes": int,
     "storage_key": str,
     "storage_backend": str,
+    "status": str,
+    "etag": str,
+    "attributes": dict,
     "uploaded_by": uuid.UUID,
     "uploaded_at": datetime.datetime,
 }
 
-#: Columns that are allowed to carry NULL.
-_NULLABLE_ALLOWED = frozenset({"uploaded_by"})
+#: Columns that are allowed to carry NULL. ``size_bytes`` and ``etag``
+#: are unknown until the two-phase upload is completed; ``attributes``
+#: is an optional client-supplied JSONB bag.
+_NULLABLE_ALLOWED = frozenset({"uploaded_by", "size_bytes", "etag", "attributes"})
 
 
 def validate_uploads_table(orm_class: DeclarativeMeta) -> None:

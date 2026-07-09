@@ -1,9 +1,11 @@
 """Handler-level tests for the files controller.
 
 The controller is exercised via Litestar's test client against a minimal
-app. The SQLAlchemy session and the ORM class are stubbed so the tests
-do not require a live PostgreSQL — the focus is on the controller's
-flow control (auth, size enforcement, per-file status, delete ordering).
+app. The SQLAlchemy session, the ORM class, the storage backend and (for
+the proxy relay) ``httpx`` are stubbed so the tests need neither a live
+PostgreSQL nor a real object store — the focus is on the controller's
+flow control (two-phase upload, size enforcement, delete ordering,
+optional URL proxying, and the HTTP relay).
 """
 
 from __future__ import annotations
@@ -11,74 +13,56 @@ from __future__ import annotations
 import datetime
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
 from litestar import Litestar
 from litestar.di import Provide
-from litestar.middleware import DefineMiddleware
 from litestar.testing import TestClient
 from litestar.types import ASGIApp, Receive, Scope, Send
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fusionserve.auth import User
 from fusionserve.files.controller import build_controller
+from fusionserve.storage.base import StorageObject, UploadTicket
+
+_UPLOAD_URL = "https://s3.example/bucket/2026/01/01/x.bin?X-Amz-Signature=up"
+_DOWNLOAD_URL = "https://s3.example/bucket/2026/01/01/x.bin?X-Amz-Signature=down"
+_ORIGIN = "https://s3.example"
 
 
 class _FakeBackend:
-    """In-memory backend with introspection hooks for the tests."""
+    """In-memory backend implementing the presigned Protocol."""
 
     def __init__(self) -> None:
-        self.objects: dict[str, bytes] = {}
-        self.content_types: dict[str, str] = {}
+        self.objects: dict[str, StorageObject] = {}
         self.delete_calls: list[str] = []
-        self.fail_save_for: set[str] = set()
-        self.fail_delete = False
-        self.presign_url: str | None = None
+        self.upload_url = _UPLOAD_URL
+        self.download_url = _DOWNLOAD_URL
+        self.origin = _ORIGIN
 
-    async def save(self, key, stream, *, content_type, declared_size):
-        buffer = bytearray()
-        async for chunk in stream:
-            buffer.extend(chunk)
-        if key in self.fail_save_for:
-            raise RuntimeError("storage failure for testing")
-        self.objects[key] = bytes(buffer)
-        self.content_types[key] = content_type
-        from fusionserve.storage.base import StorageObject
-
-        return StorageObject(key=key, size_bytes=len(buffer), content_type=content_type)
-
-    @asynccontextmanager
-    async def open(self, key):
-        if key not in self.objects:
-            raise FileNotFoundError(key)
-        data = self.objects[key]
-
-        async def _iter() -> AsyncIterator[bytes]:
-            yield data
-
-        yield _iter()
-
-    async def delete(self, key):
-        self.delete_calls.append(key)
-        if self.fail_delete:
-            raise RuntimeError("delete failure for testing")
-        self.objects.pop(key, None)
-
-    async def stat(self, key):
-        from fusionserve.storage.base import StorageObject
-
-        if key not in self.objects:
-            raise FileNotFoundError(key)
-        return StorageObject(
-            key=key,
-            size_bytes=len(self.objects[key]),
-            content_type=self.content_types.get(key, "application/octet-stream"),
+    async def generate_upload_url(self, key, *, content_type, expires_in) -> UploadTicket:
+        return UploadTicket(
+            url=self.upload_url,
+            method="PUT",
+            headers={"Content-Type": content_type},
+            expires_at=datetime.datetime.now(datetime.UTC),
         )
 
-    async def presigned_url(self, key, *, expires_in):
-        return self.presign_url
+    async def generate_download_url(self, key, *, expires_in) -> str:
+        return self.download_url
+
+    async def stat(self, key) -> StorageObject:
+        if key not in self.objects:
+            raise FileNotFoundError(key)
+        return self.objects[key]
+
+    async def delete(self, key) -> None:
+        self.delete_calls.append(key)
+        self.objects.pop(key, None)
+
+    async def object_origin(self) -> str:
+        return self.origin
 
 
 class _FakeRow:
@@ -88,39 +72,32 @@ class _FakeRow:
         self.id = kwargs.pop("id", uuid.uuid4())
         self.filename = kwargs["filename"]
         self.content_type = kwargs["content_type"]
-        self.size_bytes = kwargs["size_bytes"]
+        self.size_bytes = kwargs.get("size_bytes")
         self.storage_key = kwargs["storage_key"]
         self.storage_backend = kwargs["storage_backend"]
+        self.status = kwargs.get("status", "pending")
+        self.etag = kwargs.get("etag")
+        self.attributes = kwargs.get("attributes")
         self.uploaded_by = kwargs.get("uploaded_by")
         self.uploaded_at = kwargs.get("uploaded_at") or datetime.datetime.now(datetime.UTC)
 
 
 class _FakeSession(AsyncSession):
-    """In-memory session implementing the slice of AsyncSession we use.
-
-    Inherits from :class:`AsyncSession` so Litestar's msgspec-driven
-    signature validator accepts it where ``session: AsyncSession`` is
-    declared; the parent ``__init__`` is deliberately bypassed.
-    """
+    """In-memory session implementing the slice of AsyncSession we use."""
 
     def __init__(self) -> None:
         self.rows: dict[uuid.UUID, _FakeRow] = {}
-        self.role_calls: list[str] = []
-        self.fail_flush = False
 
     def add(self, row: _FakeRow) -> None:
         self.rows[row.id] = row
 
     async def flush(self) -> None:
-        if self.fail_flush:
-            raise RuntimeError("flush failure for testing")
+        return None
 
     async def commit(self) -> None:
         return None
 
     async def rollback(self) -> None:
-        # Drop any rows added since the last commit; the fake tracks
-        # nothing more granular than "all rows", which is enough here.
         return None
 
     async def get(self, _cls, pk):
@@ -133,6 +110,64 @@ class _FakeSession(AsyncSession):
 
     async def delete(self, row):
         self.rows.pop(row.id, None)
+
+
+# --------------------------------------------------------------------------- #
+# Fake httpx used by the proxy relay handlers.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeUpstreamResponse:
+    def __init__(self, status_code=200, headers=None, body=b"") -> None:
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._body = body
+
+    async def aiter_bytes(self, _size=65536) -> AsyncIterator[bytes]:
+        yield self._body
+
+    async def aread(self) -> bytes:
+        return self._body
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _FakeAsyncClient:
+    calls: list[dict[str, Any]] = []
+    put_response = _FakeUpstreamResponse(status_code=200, headers={"etag": '"abc"'})
+    get_response = _FakeUpstreamResponse(status_code=200, headers={"content-type": "text/plain"}, body=b"filedata")
+
+    def __init__(self, timeout=None) -> None:
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def build_request(self, method, url):
+        return {"method": method, "url": url}
+
+    async def request(self, method, url, content=None, headers=None):
+        body = bytearray()
+        if content is not None:
+            async for chunk in content:
+                body.extend(chunk)
+        _FakeAsyncClient.calls.append({"method": method, "url": url, "body": bytes(body), "headers": headers or {}})
+        return _FakeAsyncClient.put_response
+
+    async def send(self, request, stream=False):
+        _FakeAsyncClient.calls.append({"method": "GET", "url": request["url"]})
+        return _FakeAsyncClient.get_response
+
+    async def aclose(self):
+        return None
+
+
+class _FakeHttpx:
+    AsyncClient = _FakeAsyncClient
 
 
 def _make_user() -> User:
@@ -163,7 +198,14 @@ def authed_user():
     return _make_user()
 
 
-def _build_app(*, backend, session, user, max_single_file: int | None = None):
+@pytest.fixture(autouse=True)
+def _reset_proxy_setting(monkeypatch):
+    from fusionserve.config import settings
+
+    monkeypatch.setattr(settings, "storage_proxy_urls", False)
+
+
+def _build_app(*, backend, session, user, max_single_file: int | None = None, with_user: bool = True):
     """Build a minimal Litestar app hosting just the files controller."""
     from fusionserve.config import settings
 
@@ -180,138 +222,206 @@ def _build_app(*, backend, session, user, max_single_file: int | None = None):
             self.app = app
 
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-            # Litestar's auth middleware is bypassed in the test app;
-            # this mirrors what ``AuthMiddleware`` would do by stuffing
-            # the resolved user into the connection scope.
-            scope["user"] = user
-            scope["auth"] = None
+            if scope["type"] == "http":
+                scope["user"] = user
+                scope["auth"] = None
             await self.app(scope, receive, send)
 
+    from litestar.middleware import DefineMiddleware
+
+    middleware = [DefineMiddleware(_InjectUserMiddleware)] if with_user else []
     return Litestar(
         route_handlers=[controller],
         dependencies={"session": Provide(_session_provider)},
-        middleware=[DefineMiddleware(_InjectUserMiddleware)],
+        middleware=middleware,
         debug=True,
     )
 
 
-def test_upload_requires_authentication(fake_backend, fake_session):
-    """An unauthenticated POST must be rejected with 401."""
+def _seed_pending(session, backend, *, key="2026/01/01/x.bin", size=None, uploaded=False):
+    row = _FakeRow(
+        filename="report.csv",
+        content_type="text/csv",
+        size_bytes=size,
+        storage_key=key,
+        storage_backend="fake",
+        status="pending",
+    )
+    session.rows[row.id] = row
+    if uploaded:
+        backend.objects[key] = StorageObject(key=key, size_bytes=size or 10, content_type="text/csv", etag="e1")
+    return row
+
+
+# --------------------------------------------------------------------------- #
+# init
+# --------------------------------------------------------------------------- #
+
+
+def test_init_requires_authentication(fake_backend, fake_session):
     app = _build_app(backend=fake_backend, session=fake_session, user=None)
     with TestClient(app) as client:
-        response = client.post(
-            "/api/v1/_uploads",
-            files={"data": ("hello.txt", b"hi there", "text/plain")},
-        )
+        response = client.post("/api/v1/_uploads", json={"files": [{"filename": "a.txt"}]})
     assert response.status_code == 401
 
 
-def test_upload_single_file_happy_path(fake_backend, fake_session, authed_user):
-    """A well-formed single-file POST must persist and return metadata."""
+def test_init_returns_ticket_and_creates_pending_row(fake_backend, fake_session, authed_user):
     app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
     with TestClient(app) as client:
         response = client.post(
             "/api/v1/_uploads",
-            files={"data": ("hello.txt", b"hello world", "text/plain")},
+            json={"files": [{"filename": "a.txt", "content_type": "text/plain", "attributes": {"k": "v"}}]},
         )
-    assert response.status_code == 207
+    assert response.status_code == 201
     body = response.json()
     assert len(body["items"]) == 1
     item = body["items"][0]
-    assert item["status"] == "ok"
-    assert item["filename"] == "hello.txt"
-    upload = item["upload"]
-    assert upload["filename"] == "hello.txt"
-    assert upload["content_type"] == "text/plain"
-    assert upload["size_bytes"] == len(b"hello world")
-    # Server-side attribution from request.user.id, not the body.
-    assert uuid.UUID(upload["uploaded_by"]) == authed_user.id
-    # Blob is actually stored under the server-generated key.
-    assert fake_backend.objects[upload["storage_key"]] == b"hello world"
+    assert item["filename"] == "a.txt"
+    assert item["upload_url"] == _UPLOAD_URL
+    assert item["method"] == "PUT"
+    assert item["headers"] == {"Content-Type": "text/plain"}
+    # Pending row persisted with server-side attribution + attributes.
+    row = fake_session.rows[uuid.UUID(item["id"])]
+    assert row.status == "pending"
+    assert row.size_bytes is None
+    assert row.attributes == {"k": "v"}
+    assert row.uploaded_by == authed_user.id
 
 
-def test_upload_multi_file_returns_per_file_status(fake_backend, fake_session, authed_user):
-    """A multi-file POST must return one ``items`` entry per part."""
+def test_init_multi_file(fake_backend, fake_session, authed_user):
     app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
     with TestClient(app) as client:
         response = client.post(
             "/api/v1/_uploads",
-            files=[
-                ("data", ("a.txt", b"AAA", "text/plain")),
-                ("data", ("b.txt", b"BBBB", "text/plain")),
-            ],
+            json={"files": [{"filename": "a.txt"}, {"filename": "b.bin", "content_type": "application/octet-stream"}]},
         )
-    assert response.status_code == 207
-    body = response.json()
-    assert [item["filename"] for item in body["items"]] == ["a.txt", "b.txt"]
-    assert all(item["status"] == "ok" for item in body["items"])
-    sizes = [item["upload"]["size_bytes"] for item in body["items"]]
-    assert sizes == [3, 4]
+    assert response.status_code == 201
+    assert [i["filename"] for i in response.json()["items"]] == ["a.txt", "b.bin"]
 
 
-def test_upload_oversize_file_yields_per_file_error(fake_backend, fake_session, authed_user):
-    """An oversize file must produce a per-file error without aborting the batch."""
-    app = _build_app(
-        backend=fake_backend,
-        session=fake_session,
-        user=authed_user,
-        max_single_file=4,
-    )
+def test_init_empty_batch_rejected(fake_backend, fake_session, authed_user):
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
     with TestClient(app) as client:
-        response = client.post(
-            "/api/v1/_uploads",
-            files=[
-                ("data", ("ok.txt", b"AAA", "text/plain")),
-                ("data", ("big.txt", b"BBBBBBBB", "text/plain")),
-            ],
-        )
-    assert response.status_code == 207
-    body = response.json()
-    statuses = [item["status"] for item in body["items"]]
-    assert statuses == ["ok", "error"]
-    assert "exceeds per-file size limit" in body["items"][1]["error"]
-    # Oversize blob must have been cleaned up.
-    big_keys = [k for k, v in fake_backend.objects.items() if v.startswith(b"BBB")]
-    assert big_keys == []
+        response = client.post("/api/v1/_uploads", json={"files": []})
+    assert response.status_code == 400
 
 
-def test_upload_storage_failure_recorded_as_per_file_error(fake_backend, fake_session, authed_user):
-    """A backend exception must produce a per-file error, not a 5xx."""
-    # Force the next save to raise.
-    fake_backend.fail_save_for = {"placeholder"}
+def test_init_returns_proxy_url_when_enabled(fake_backend, fake_session, authed_user, monkeypatch):
+    from fusionserve.config import settings
 
-    class _BoomBackend(_FakeBackend):
-        async def save(self, key, stream, *, content_type, declared_size):
-            async for _ in stream:
-                pass
-            raise RuntimeError("kaboom")
-
-    boom = _BoomBackend()
-    app = _build_app(backend=boom, session=fake_session, user=authed_user)
+    monkeypatch.setattr(settings, "storage_proxy_urls", True)
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
     with TestClient(app) as client:
-        response = client.post(
-            "/api/v1/_uploads",
-            files={"data": ("oops.txt", b"hi", "text/plain")},
-        )
-    assert response.status_code == 207
+        response = client.post("/api/v1/_uploads", json={"files": [{"filename": "a.txt"}]})
+    url = response.json()["items"][0]["upload_url"]
+    assert "/api/v1/_uploads/_proxy/bucket/2026/01/01/x.bin" in url
+    assert "X-Amz-Signature=up" in url
+    assert "s3.example" not in url
+
+
+# --------------------------------------------------------------------------- #
+# complete
+# --------------------------------------------------------------------------- #
+
+
+def test_complete_verifies_and_marks_completed(fake_backend, fake_session, authed_user):
+    row = _seed_pending(fake_session, fake_backend, size=123, uploaded=True)
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/_uploads/{row.id}/complete")
+    assert response.status_code == 201
     body = response.json()
-    assert body["items"][0]["status"] == "error"
-    assert "storage error" in body["items"][0]["error"]
+    assert body["status"] == "completed"
+    assert body["size_bytes"] == 123
+    assert body["etag"] == "e1"
+    assert row.status == "completed"
+
+
+def test_complete_overwrites_attributes(fake_backend, fake_session, authed_user):
+    row = _seed_pending(fake_session, fake_backend, size=10, uploaded=True)
+    row.attributes = {"orig": 1}
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/_uploads/{row.id}/complete", json={"attributes": {"new": 2}})
+    assert response.status_code == 201
+    assert row.attributes == {"new": 2}
+
+
+def test_complete_missing_object_returns_409(fake_backend, fake_session, authed_user):
+    row = _seed_pending(fake_session, fake_backend, uploaded=False)
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/_uploads/{row.id}/complete")
+    assert response.status_code == 409
+
+
+def test_complete_oversize_object_rejected_and_cleaned(fake_backend, fake_session, authed_user):
+    row = _seed_pending(fake_session, fake_backend, key="k/big.bin", size=999, uploaded=True)
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user, max_single_file=100)
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/_uploads/{row.id}/complete")
+    assert response.status_code == 413
+    assert "k/big.bin" in fake_backend.delete_calls
+    assert row.id not in fake_session.rows
+
+
+def test_complete_missing_row_returns_404(fake_backend, fake_session, authed_user):
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/_uploads/{uuid.uuid4()}/complete")
+    assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# download
+# --------------------------------------------------------------------------- #
+
+
+def test_download_requires_authentication(fake_backend, fake_session):
+    row = _seed_pending(fake_session, fake_backend, uploaded=True)
+    app = _build_app(backend=fake_backend, session=fake_session, user=None)
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/_uploads/{row.id}/content", follow_redirects=False)
+    assert response.status_code == 401
+
+
+def test_download_redirects_to_presigned_url(fake_backend, fake_session, authed_user):
+    row = _seed_pending(fake_session, fake_backend, uploaded=True)
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/_uploads/{row.id}/content", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == _DOWNLOAD_URL
+
+
+def test_download_redirects_to_proxy_url_when_enabled(fake_backend, fake_session, authed_user, monkeypatch):
+    from fusionserve.config import settings
+
+    monkeypatch.setattr(settings, "storage_proxy_urls", True)
+    row = _seed_pending(fake_session, fake_backend, uploaded=True)
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/_uploads/{row.id}/content", follow_redirects=False)
+    assert response.status_code == 302
+    location = response.headers["location"]
+    assert "/api/v1/_uploads/_proxy/bucket/2026/01/01/x.bin" in location
+    assert "X-Amz-Signature=down" in location
+
+
+def test_download_missing_row_returns_404(fake_backend, fake_session, authed_user):
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/_uploads/{uuid.uuid4()}/content", follow_redirects=False)
+    assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# delete
+# --------------------------------------------------------------------------- #
 
 
 def test_delete_calls_backend_then_removes_row(fake_backend, fake_session, authed_user):
-    """``DELETE`` must drop the blob *before* the metadata row."""
-    # Seed a fake row + blob.
-    row = _FakeRow(
-        filename="x.txt",
-        content_type="text/plain",
-        size_bytes=3,
-        storage_key="seed/key.txt",
-        storage_backend="fake",
-    )
-    fake_session.rows[row.id] = row
-    fake_backend.objects["seed/key.txt"] = b"xxx"
-
+    row = _seed_pending(fake_session, fake_backend, key="seed/key.txt", size=3, uploaded=True)
     app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
     with TestClient(app) as client:
         response = client.delete(f"/api/v1/_uploads/{row.id}")
@@ -327,68 +437,42 @@ def test_delete_missing_row_returns_404(fake_backend, fake_session, authed_user)
     assert response.status_code == 404
 
 
-def test_download_streams_blob(fake_backend, fake_session, authed_user):
-    """A standard GET must stream the blob with the original content type."""
-    row = _FakeRow(
-        filename="report.csv",
-        content_type="text/csv",
-        size_bytes=10,
-        storage_key="2026/01/01/abc.csv",
-        storage_backend="fake",
-    )
-    fake_session.rows[row.id] = row
-    fake_backend.objects["2026/01/01/abc.csv"] = b"col1,col2\n"
+# --------------------------------------------------------------------------- #
+# proxy relay
+# --------------------------------------------------------------------------- #
 
-    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+
+def test_proxy_upload_relays_body_to_object_store(fake_backend, fake_session, monkeypatch):
+    from fusionserve.files import controller as controller_module
+
+    _FakeAsyncClient.calls = []
+    monkeypatch.setattr(controller_module, "httpx", _FakeHttpx)
+    app = _build_app(backend=fake_backend, session=fake_session, user=None, with_user=False)
     with TestClient(app) as client:
-        response = client.get(f"/api/v1/_uploads/{row.id}/content")
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/csv")
-    assert response.content == b"col1,col2\n"
-    assert "attachment" in response.headers.get("content-disposition", "")
-
-
-def test_download_with_redirect_uses_presigned_url(fake_backend, fake_session, authed_user):
-    """``?redirect=1`` must 302 to the presigned URL when the backend supports it."""
-    fake_backend.presign_url = "https://example.com/signed?abc=123"
-    row = _FakeRow(
-        filename="big.bin",
-        content_type="application/octet-stream",
-        size_bytes=4,
-        storage_key="2026/01/01/big.bin",
-        storage_backend="fake",
-    )
-    fake_session.rows[row.id] = row
-    fake_backend.objects["2026/01/01/big.bin"] = b"data"
-
-    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
-    with TestClient(app) as client:
-        response = client.get(
-            f"/api/v1/_uploads/{row.id}/content?redirect=1",
-            follow_redirects=False,
-        )
-    assert response.status_code == 302
-    assert response.headers["location"] == "https://example.com/signed?abc=123"
-
-
-def test_download_redirect_falls_back_to_stream_when_unsupported(fake_backend, fake_session, authed_user):
-    """``?redirect=1`` against a backend without presigning must still stream."""
-    fake_backend.presign_url = None
-    row = _FakeRow(
-        filename="x.bin",
-        content_type="application/octet-stream",
-        size_bytes=2,
-        storage_key="2026/01/02/x.bin",
-        storage_backend="fake",
-    )
-    fake_session.rows[row.id] = row
-    fake_backend.objects["2026/01/02/x.bin"] = b"hi"
-
-    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
-    with TestClient(app) as client:
-        response = client.get(
-            f"/api/v1/_uploads/{row.id}/content?redirect=1",
-            follow_redirects=False,
+        response = client.put(
+            "/api/v1/_uploads/_proxy/bucket/2026/01/01/x.bin?X-Amz-Signature=up",
+            content=b"hello world",
+            headers={"Content-Type": "image/png"},
         )
     assert response.status_code == 200
-    assert response.content == b"hi"
+    assert response.headers.get("etag") == '"abc"'
+    call = _FakeAsyncClient.calls[-1]
+    assert call["method"] == "PUT"
+    assert call["url"] == f"{_ORIGIN}/bucket/2026/01/01/x.bin?X-Amz-Signature=up"
+    assert call["body"] == b"hello world"
+    assert call["headers"].get("Content-Type") == "image/png"
+
+
+def test_proxy_download_streams_body_from_object_store(fake_backend, fake_session, monkeypatch):
+    from fusionserve.files import controller as controller_module
+
+    _FakeAsyncClient.calls = []
+    monkeypatch.setattr(controller_module, "httpx", _FakeHttpx)
+    app = _build_app(backend=fake_backend, session=fake_session, user=None, with_user=False)
+    with TestClient(app) as client:
+        response = client.get("/api/v1/_uploads/_proxy/bucket/2026/01/01/x.bin?X-Amz-Signature=down")
+    assert response.status_code == 200
+    assert response.content == b"filedata"
+    assert response.headers["content-type"].startswith("text/plain")
+    call = _FakeAsyncClient.calls[-1]
+    assert call["url"] == f"{_ORIGIN}/bucket/2026/01/01/x.bin?X-Amz-Signature=down"

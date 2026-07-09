@@ -7,13 +7,24 @@ when the operator-supplied ``uploads`` table is present.
 
 from __future__ import annotations
 
-from .controller import UploadBatchResponse, UploadItem, UploadModel, build_controller
+from .controller import (
+    CompleteUploadRequest,
+    InitBatchResponse,
+    InitUploadFile,
+    InitUploadRequest,
+    UploadModel,
+    UploadTicketItem,
+    build_controller,
+)
 from .metadata import validate_uploads_table
 
 __all__ = [
-    "UploadBatchResponse",
-    "UploadItem",
+    "CompleteUploadRequest",
+    "InitBatchResponse",
+    "InitUploadFile",
+    "InitUploadRequest",
     "UploadModel",
+    "UploadTicketItem",
     "build_controller",
     "validate_uploads_table",
 ]

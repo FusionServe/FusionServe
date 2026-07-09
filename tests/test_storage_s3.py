@@ -6,23 +6,19 @@ moto-backed S3. Rationale:
 * aiobotocore (≥ 2.25) and moto don't share an HTTP-stubbing contract,
   so the round-trip path is brittle across patch releases.
 * The S3 backend itself is a thin adapter — the value of testing it is
-  pinning the wire-level operations it invokes (``put_object``,
-  ``get_object``, ``head_object``, ``delete_object``,
-  ``generate_presigned_url``), not re-testing S3 semantics.
+  pinning the wire-level operations it invokes
+  (``generate_presigned_url``, ``head_object``, ``delete_object``), not
+  re-testing S3 semantics.
 * The "mock the boundary" pattern matches the rest of the FusionServe
   unit suite (see AGENTS.md → Tests).
 
 Integration coverage against a live MinIO or real S3 is out of scope of
-the unit suite and lives behind ``RUN_INTEGRATION=1`` in
-``test_files_integration.py`` (added when the feature graduates from
-alpha).
+the unit suite.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -32,11 +28,6 @@ from fusionserve.config import settings
 from fusionserve.storage.s3 import S3Backend
 
 _BUCKET = "fusionserve-test"
-
-
-async def _async_iter(chunks: list[bytes]) -> AsyncIterator[bytes]:
-    for chunk in chunks:
-        yield chunk
 
 
 @pytest.fixture
@@ -63,63 +54,37 @@ def _client_error(code: str) -> ClientError:
     )
 
 
-async def test_save_calls_put_object_with_body_and_content_type(s3_settings):
-    """``save`` must invoke ``put_object`` with the streamed body and MIME type."""
+async def test_generate_upload_url_signs_put_with_content_type(s3_settings):
+    """``generate_upload_url`` must presign put_object and bind ContentType."""
     backend = S3Backend()
     client = MagicMock()
-    client.put_object = AsyncMock(return_value={"ETag": '"deadbeef"'})
+    client.generate_presigned_url = AsyncMock(return_value="https://example/put?sig=1")
     _install_client(backend, client)
 
-    obj = await backend.save(
-        "2026/01/01/abc.bin",
-        _async_iter([b"hel", b"lo"]),
-        content_type="application/octet-stream",
-        declared_size=None,
-    )
+    ticket = await backend.generate_upload_url("2026/01/01/x.bin", content_type="image/png", expires_in=99)
 
-    client.put_object.assert_awaited_once()
-    kwargs = client.put_object.call_args.kwargs
-    assert kwargs["Bucket"] == _BUCKET
-    assert kwargs["Key"] == "2026/01/01/abc.bin"
-    assert kwargs["Body"] == b"hello"
-    assert kwargs["ContentType"] == "application/octet-stream"
-    assert obj.size_bytes == 5
-    assert obj.etag == "deadbeef"
+    client.generate_presigned_url.assert_awaited_once()
+    kwargs = client.generate_presigned_url.call_args.kwargs
+    assert client.generate_presigned_url.call_args.args[0] == "put_object"
+    assert kwargs["Params"] == {"Bucket": _BUCKET, "Key": "2026/01/01/x.bin", "ContentType": "image/png"}
+    assert kwargs["ExpiresIn"] == 99
+    assert ticket.url == "https://example/put?sig=1"
+    assert ticket.method == "PUT"
+    assert ticket.headers == {"Content-Type": "image/png"}
 
 
-async def test_open_yields_chunks_from_get_object(s3_settings):
-    """``open`` must stream chunks from the ``Body`` returned by ``get_object``."""
-    backend = S3Backend()
-    body = MagicMock()
-
-    async def _iter_chunks(_size: int) -> AsyncIterator[bytes]:
-        for c in (b"abc", b"def"):
-            yield c
-
-    body.iter_chunks = _iter_chunks
-    body.close = MagicMock()
-
-    client = MagicMock()
-    client.get_object = AsyncMock(return_value={"Body": body})
-    _install_client(backend, client)
-
-    received = bytearray()
-    async with backend.open("k") as chunks:
-        async for chunk in chunks:
-            received.extend(chunk)
-    assert bytes(received) == b"abcdef"
-    body.close.assert_called_once()
-
-
-async def test_open_translates_nosuchkey_to_filenotfound(s3_settings):
+async def test_generate_download_url_signs_get(s3_settings):
     backend = S3Backend()
     client = MagicMock()
-    client.get_object = AsyncMock(side_effect=_client_error("NoSuchKey"))
+    client.generate_presigned_url = AsyncMock(return_value="https://example/get?sig=2")
     _install_client(backend, client)
 
-    with pytest.raises(FileNotFoundError):
-        async with backend.open("missing"):
-            pass
+    url = await backend.generate_download_url("k", expires_in=42)
+    kwargs = client.generate_presigned_url.call_args.kwargs
+    assert client.generate_presigned_url.call_args.args[0] == "get_object"
+    assert kwargs["Params"] == {"Bucket": _BUCKET, "Key": "k"}
+    assert kwargs["ExpiresIn"] == 42
+    assert url == "https://example/get?sig=2"
 
 
 async def test_stat_returns_metadata(s3_settings):
@@ -154,21 +119,35 @@ async def test_delete_invokes_delete_object(s3_settings):
     client.delete_object.assert_awaited_once_with(Bucket=_BUCKET, Key="any/key")
 
 
-async def test_presigned_url_uses_get_object_with_ttl(s3_settings):
+async def test_object_origin_parses_scheme_and_host(s3_settings):
+    """``object_origin`` must return scheme://host of a presigned URL."""
     backend = S3Backend()
     client = MagicMock()
-    client.generate_presigned_url = AsyncMock(return_value="https://example/signed")
+    client.generate_presigned_url = AsyncMock(
+        return_value="https://fusionserve-test.s3.amazonaws.com/probe?X-Amz-Signature=zzz"
+    )
     _install_client(backend, client)
 
-    url = await backend.presigned_url("k", expires_in=42)
+    origin = await backend.object_origin()
+    assert origin == "https://fusionserve-test.s3.amazonaws.com"
+    # Cached: a second call must not re-presign.
+    await backend.object_origin()
     client.generate_presigned_url.assert_awaited_once()
-    args: dict[str, Any] = client.generate_presigned_url.call_args.kwargs
-    assert args["Params"] == {"Bucket": _BUCKET, "Key": "k"}
-    assert args["ExpiresIn"] == 42
-    assert url == "https://example/signed"
 
 
 def test_construction_without_bucket_raises(monkeypatch):
     monkeypatch.setattr(settings.storage_s3, "bucket", "")
     with pytest.raises(ValueError, match="bucket"):
         S3Backend()
+
+
+async def test_object_origin_honours_endpoint_url(monkeypatch):
+    """A custom endpoint (MinIO) must surface in the derived origin."""
+    monkeypatch.setattr(settings.storage_s3, "bucket", _BUCKET)
+    backend = S3Backend()
+    client = MagicMock()
+    client.generate_presigned_url = AsyncMock(return_value="http://minio:9000/fusionserve-test/probe?sig=1")
+    _install_client(backend, client)
+
+    origin = await backend.object_origin()
+    assert origin == "http://minio:9000"

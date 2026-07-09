@@ -4,8 +4,9 @@ Exposes :func:`load_backend` (used at startup) and :func:`get_storage`
 (an lru-cached singleton accessor used by request handlers). Backends are
 selected by the ``storage_backend`` setting:
 
-* ``"filesystem"`` → :class:`fusionserve.storage.filesystem.FilesystemBackend`
 * ``"s3"`` → :class:`fusionserve.storage.s3.S3Backend`
+* ``"azure"`` → :class:`fusionserve.storage.azure.AzureBlobBackend`
+  (placeholder — raises ``NotImplementedError`` on use)
 * anything else is treated as a dotted import path
   ``"pkg.mod:ClassName"`` and resolved via :mod:`importlib`.
 """
@@ -17,19 +18,19 @@ import logging
 from functools import lru_cache
 
 from ..config import settings
-from .base import StorageBackend, StorageObject
+from .base import StorageBackend, StorageObject, UploadTicket
 
 _logger = logging.getLogger(settings.app_name)
 
-__all__ = ["StorageBackend", "StorageObject", "get_storage", "load_backend"]
+__all__ = ["StorageBackend", "StorageObject", "UploadTicket", "get_storage", "load_backend"]
 
 
 def load_backend(spec: str) -> StorageBackend:
     """Instantiate the storage backend identified by ``spec``.
 
-    The two short literals ``"filesystem"`` and ``"s3"`` resolve to the
-    bundled backends. Any other value is treated as a ``"pkg.mod:Class"``
-    dotted import path; the class is imported and instantiated with no
+    The short literals ``"s3"`` and ``"azure"`` resolve to the bundled
+    backends. Any other value is treated as a ``"pkg.mod:Class"`` dotted
+    import path; the class is imported and instantiated with no
     constructor arguments (backends read their own settings from
     :mod:`fusionserve.config`).
 
@@ -46,18 +47,18 @@ def load_backend(spec: str) -> StorageBackend:
         ValueError: If ``spec`` is not a recognised literal and does not
             contain the ``module:Class`` separator.
     """
-    if spec == "filesystem":
-        from .filesystem import FilesystemBackend
-
-        return FilesystemBackend()
     if spec == "s3":
         from .s3 import S3Backend
 
         return S3Backend()
+    if spec == "azure":
+        from .azure import AzureBlobBackend
+
+        return AzureBlobBackend()
 
     if ":" not in spec:
         raise ValueError(
-            f"Unknown storage backend {spec!r}. Use 'filesystem', 's3', or a 'pkg.mod:ClassName' dotted import path."
+            f"Unknown storage backend {spec!r}. Use 's3', 'azure', or a 'pkg.mod:ClassName' dotted import path."
         )
     module_path, _, class_name = spec.partition(":")
     module = importlib.import_module(module_path)

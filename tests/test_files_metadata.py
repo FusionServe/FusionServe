@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import BigInteger, Column, DateTime, MetaData, String, Table
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from fusionserve.files.metadata import validate_uploads_table
 
@@ -20,9 +20,12 @@ def _make_table(*, drop: str | None = None, change: dict[str, Column] | None = N
         "id": Column("id", UUID(as_uuid=True), primary_key=True),
         "filename": Column("filename", String, nullable=False),
         "content_type": Column("content_type", String, nullable=False),
-        "size_bytes": Column("size_bytes", BigInteger, nullable=False),
+        "size_bytes": Column("size_bytes", BigInteger, nullable=True),
         "storage_key": Column("storage_key", String, unique=True, nullable=False),
         "storage_backend": Column("storage_backend", String, nullable=False),
+        "status": Column("status", String, nullable=False),
+        "etag": Column("etag", String, nullable=True),
+        "attributes": Column("attributes", JSONB, nullable=True),
         "uploaded_by": Column("uploaded_by", UUID(as_uuid=True), nullable=True),
         "uploaded_at": Column("uploaded_at", DateTime(timezone=True), nullable=False),
     }
@@ -58,7 +61,7 @@ def test_validate_uploads_table_rejects_wrong_type():
 
 
 def test_validate_uploads_table_rejects_unexpected_nullable():
-    """Only ``uploaded_by`` may be nullable; other nullables must fail."""
+    """Non-allowlisted columns must not be nullable."""
     bad = _make_table(change={"filename": Column("filename", String, nullable=True)})
     with pytest.raises(ValueError, match="filename"):
         validate_uploads_table(bad)
@@ -68,3 +71,29 @@ def test_validate_uploads_table_allows_nullable_uploaded_by():
     """``uploaded_by`` is allowed (and recommended) to be nullable."""
     # The default fixture already has uploaded_by nullable; just confirm it passes.
     validate_uploads_table(_make_table())
+
+
+def test_validate_uploads_table_allows_nullable_size_etag_attributes():
+    """``size_bytes``/``etag``/``attributes`` are unknown until complete."""
+    validate_uploads_table(
+        _make_table(
+            change={
+                "size_bytes": Column("size_bytes", BigInteger, nullable=True),
+                "etag": Column("etag", String, nullable=True),
+                "attributes": Column("attributes", JSONB, nullable=True),
+            }
+        )
+    )
+
+
+def test_validate_uploads_table_rejects_missing_status():
+    """The new ``status`` column is required."""
+    with pytest.raises(ValueError, match="missing required columns"):
+        validate_uploads_table(_make_table(drop="status"))
+
+
+def test_validate_uploads_table_rejects_wrong_attributes_type():
+    """``attributes`` must map to a JSON (dict) Python type."""
+    bad = _make_table(change={"attributes": Column("attributes", String, nullable=True)})
+    with pytest.raises(ValueError, match="attributes"):
+        validate_uploads_table(bad)

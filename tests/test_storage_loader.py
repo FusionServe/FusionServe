@@ -1,9 +1,9 @@
 """Unit tests for :mod:`fusionserve.storage` loader/dispatcher.
 
-These tests touch only the loader helpers — no network, no S3, no
-filesystem writes. The bundled backends are imported to ensure
-``load_backend`` short-circuits on the two literals, and the
-dotted-path branch is exercised against an in-memory dummy class.
+These tests touch only the loader helpers — no network, no S3. The
+bundled backends are imported to ensure ``load_backend`` short-circuits
+on the ``s3`` / ``azure`` literals, and the dotted-path branch is
+exercised against an in-memory dummy class.
 """
 
 from __future__ import annotations
@@ -19,10 +19,10 @@ from fusionserve.storage import StorageBackend, load_backend
 class _DummyBackend:
     """Minimal stub satisfying the :class:`StorageBackend` protocol."""
 
-    async def save(self, key, stream, *, content_type, declared_size):
-        return None  # type: ignore[return-value]
+    async def generate_upload_url(self, key, *, content_type, expires_in):
+        raise NotImplementedError
 
-    def open(self, key):
+    async def generate_download_url(self, key, *, expires_in):
         raise NotImplementedError
 
     async def delete(self, key):
@@ -31,8 +31,8 @@ class _DummyBackend:
     async def stat(self, key):
         raise NotImplementedError
 
-    async def presigned_url(self, key, *, expires_in):
-        return None
+    async def object_origin(self):
+        raise NotImplementedError
 
 
 def _register_dummy_module(name: str, **attrs: object) -> None:
@@ -43,14 +43,24 @@ def _register_dummy_module(name: str, **attrs: object) -> None:
     sys.modules[name] = module
 
 
-def test_load_backend_filesystem_literal_returns_filesystem_backend(tmp_path, monkeypatch):
-    """The ``filesystem`` literal must resolve to the bundled backend."""
-    from fusionserve.config import settings
-
-    monkeypatch.setattr(settings, "storage_fs_root", tmp_path)
-    backend = load_backend("filesystem")
-    assert type(backend).__name__ == "FilesystemBackend"
+def test_load_backend_azure_literal_returns_placeholder():
+    """The ``azure`` literal must resolve to the placeholder backend."""
+    backend = load_backend("azure")
+    assert type(backend).__name__ == "AzureBlobBackend"
     assert isinstance(backend, StorageBackend)
+
+
+async def test_azure_placeholder_methods_raise_not_implemented():
+    """Every placeholder method must fail loudly rather than no-op."""
+    backend = load_backend("azure")
+    with pytest.raises(NotImplementedError):
+        await backend.generate_upload_url("k", content_type="text/plain", expires_in=60)
+    with pytest.raises(NotImplementedError):
+        await backend.generate_download_url("k", expires_in=60)
+    with pytest.raises(NotImplementedError):
+        await backend.stat("k")
+    with pytest.raises(NotImplementedError):
+        await backend.object_origin()
 
 
 def test_load_backend_s3_literal_returns_s3_backend(monkeypatch):

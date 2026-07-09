@@ -23,7 +23,6 @@ requires-python = ">=3.14"
 dependencies = [
     "advanced-alchemy>=1.9.3",
     "aioboto3>=13.0.0",
-    "aiofiles>=24.1.0",
     "asyncpg",
     "brotli>=1.2.0",
     # Both granian and uvicorn are supported runtime servers.
@@ -67,7 +66,6 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.16",
     "testcontainers[postgres]>=4.14.2",
-    "types-aiofiles>=24.1.0",
 ]
 
 [tool.ruff]
