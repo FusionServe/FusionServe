@@ -242,6 +242,13 @@ def _patch_strawberry_orm_uuid() -> None:
       :data:`fusionserve.models.FILTER_OVERRIDES` supply the uuid lookup (and,
       as a bonus, types uuid mutation-input fields as the UUID scalar — matching
       the already-uuid output type).
+    * ``_SA_TYPE_MAP["JSON"]`` maps ``json`` columns to ``str`` and ``jsonb``
+      columns fall through to the same ``str`` default (``"JSONB"`` is absent),
+      so JSON/JSONB mutation-input fields are typed ``String`` — forcing clients
+      to send a JSON-encoded string instead of a JSON value, and mismatching the
+      ``JSON``-scalar output type produced by :func:`_column_annotation`.
+      Repointing both ``"JSON"`` and ``"JSONB"`` at Strawberry's ``JSON`` scalar
+      types the input fields as ``JSON``, symmetric with reads.
     * ``_coerce_reference_value`` powers ``ReferenceLookup`` (used for every
       non-int primary key and uuid FK), coercing values to ``int`` or ``str``
       only — never ``uuid.UUID``. Wrapping it to try ``int`` → ``uuid.UUID`` →
@@ -259,13 +266,15 @@ def _patch_strawberry_orm_uuid() -> None:
     from strawberry_orm.backends import sqlalchemy as _sa_backend
 
     type_map = getattr(_sa_backend, "_SA_TYPE_MAP", None)
-    if not isinstance(type_map, dict) or "UUID" not in type_map:
+    if not isinstance(type_map, dict) or "UUID" not in type_map or "JSON" not in type_map:
         raise RuntimeError(
             "strawberry-orm SQLAlchemy backend is missing the private '_SA_TYPE_MAP' "
             "this build relies on. A strawberry-orm upgrade likely changed its internals "
             "— update fusionserve.graphql._patch_strawberry_orm_uuid()."
         )
     type_map["UUID"] = uuid.UUID
+    type_map["JSON"] = StrawberryJSON
+    type_map["JSONB"] = StrawberryJSON
 
     original = getattr(_sa_backend, "_coerce_reference_value", None)
     if original is None:

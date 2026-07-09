@@ -116,6 +116,19 @@ def test_uuid_reference_lookup_coerces_and_binds_as_uuid():
     assert "UUID" in sql
 
 
+def test_json_columns_typed_as_json_scalar_in_inputs():
+    """The graphql import maps json/jsonb columns to the JSON scalar in input types.
+
+    Without the patch the backend types JSON/JSONB mutation-input fields as
+    ``str`` (``"JSON"`` -> str, ``"JSONB"`` absent -> str default), mismatching
+    the JSON-scalar output type produced by ``_column_annotation``.
+    """
+    from strawberry.scalars import JSON as StrawberryJSON
+
+    assert sa_backend._SA_TYPE_MAP["JSON"] is StrawberryJSON
+    assert sa_backend._SA_TYPE_MAP["JSONB"] is StrawberryJSON
+
+
 def test_uuid_patch_applied_to_backend_internals():
     """The graphql import patches the backend's uuid type map + reference coercion."""
     assert sa_backend._SA_TYPE_MAP["UUID"] is uuid.UUID
