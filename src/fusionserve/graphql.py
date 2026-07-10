@@ -650,17 +650,21 @@ def _attach_mutations(mutation_cls: type, orm: StrawberryORM, orm_class: type, g
         return list(result)
 
     async def update_resolver(info: strawberry.Info, patch: object, **kwids: object) -> gql_type:  # type: ignore[valid-type]
+        values = _set_fields(patch)
+        if not values:
+            raise ValueError("patch must contain at least one field to update")
         session = info.context.session
-        statement = select(orm_class)
-        for key, value in kwids.items():
-            statement = statement.where(getattr(orm_class, key) == value)
+        statement = (
+            update(orm_class)
+            .where(*[getattr(orm_class, key) == value for key, value in kwids.items()])
+            .values(**values)
+            .returning(orm_class)
+            .execution_options(synchronize_session=None)
+        )
         result = (await session.execute(statement)).scalar_one_or_none()
         if result is None:
             raise RecordNotFoundError(f"No {table.name} record matches {kwids}")
-        for key, value in _set_fields(patch).items():
-            setattr(result, key, value)
         await session.commit()
-        await session.refresh(result)
         return result
 
     async def update_many_resolver(info: strawberry.Info, patch: object, where: object) -> list[gql_type]:  # type: ignore[valid-type]

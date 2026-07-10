@@ -95,6 +95,8 @@ class S3Backend:
                 ExpiresIn=expires_in,
             )
         expires_at = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=expires_in)
+        _logger.debug("Generated presigned PUT URL for %r (expires %s)", key, expires_at)
+        _logger.debug("Presigned URL: %s", url)
         return UploadTicket(url=url, method="PUT", headers={"Content-Type": content_type}, expires_at=expires_at)
 
     async def generate_download_url(self, key: str, *, expires_in: int) -> str:
