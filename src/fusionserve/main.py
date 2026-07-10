@@ -19,6 +19,7 @@ from .persistence import get_async_session, introspect
 from .storage import get_storage
 
 _logger = logging.getLogger(settings.app_name)
+_logger.setLevel(settings.log_level)
 
 
 @asynccontextmanager
