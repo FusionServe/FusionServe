@@ -26,7 +26,7 @@ class S3Settings(BaseModel):
     """
 
     bucket: str = ""
-    region: str = "us-east-1"
+    region: str | None = None
     endpoint_url: str | None = None
     access_key_id: str | None = None
     secret_access_key: SecretStr | None = None
