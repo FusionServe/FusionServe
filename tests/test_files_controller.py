@@ -20,6 +20,7 @@ from litestar import Litestar
 from litestar.di import Provide
 from litestar.testing import TestClient
 from litestar.types import ASGIApp, Receive, Scope, Send
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fusionserve.auth import User
@@ -87,12 +88,20 @@ class _FakeSession(AsyncSession):
 
     def __init__(self) -> None:
         self.rows: dict[uuid.UUID, _FakeRow] = {}
+        self._pending: _FakeRow | None = None
 
     def add(self, row: _FakeRow) -> None:
+        self._pending = row
         self.rows[row.id] = row
 
     async def flush(self) -> None:
-        return None
+        # Emulate the DB's UNIQUE(storage_key) constraint.
+        pending = self._pending
+        if pending is not None and any(
+            other.id != pending.id and other.storage_key == pending.storage_key for other in self.rows.values()
+        ):
+            self.rows.pop(pending.id, None)
+            raise IntegrityError("INSERT", {}, Exception("duplicate key value violates unique constraint"))
 
     async def commit(self) -> None:
         return None
@@ -277,12 +286,15 @@ def test_init_returns_ticket_and_creates_pending_row(fake_backend, fake_session,
     assert len(body["items"]) == 1
     item = body["items"][0]
     assert item["filename"] == "a.txt"
+    # Storage key is the (sanitized) client filename.
+    assert item["storage_key"] == "a.txt"
     assert item["upload_url"] == _UPLOAD_URL
     assert item["method"] == "PUT"
     assert item["headers"] == {"Content-Type": "text/plain"}
     # Pending row persisted with server-side attribution + attributes.
     row = fake_session.rows[uuid.UUID(item["id"])]
     assert row.status == "pending"
+    assert row.storage_key == "a.txt"
     assert row.size_bytes is None
     assert row.attributes == {"k": "v"}
     assert row.uploaded_by == authed_user.id
@@ -306,6 +318,43 @@ def test_init_empty_batch_rejected(fake_backend, fake_session, authed_user):
     assert response.status_code == 400
 
 
+def test_init_preserves_directories_and_strips_leading_traversal(fake_backend, fake_session, authed_user):
+    """Leading ``../`` is stripped while the directory structure survives."""
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        response = client.post("/api/v1/_uploads", json={"files": [{"filename": "../../etc/passwd"}]})
+    assert response.status_code == 201
+    key = response.json()["items"][0]["storage_key"]
+    assert key == "etc/passwd"
+    assert ".." not in key
+
+
+def test_init_collapses_mid_path_traversal(fake_backend, fake_session, authed_user):
+    """Runs of 2+ dots anywhere in the path collapse to a single dot."""
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/_uploads",
+            json={"files": [{"filename": "a/../../b.txt"}, {"filename": "c/..../d.txt"}]},
+        )
+    assert response.status_code == 201
+    keys = [item["storage_key"] for item in response.json()["items"]]
+    assert keys == ["a/././b.txt", "c/./d.txt"]
+    for key in keys:
+        assert ".." not in key
+        assert "/" in key
+
+
+def test_init_duplicate_filename_returns_409(fake_backend, fake_session, authed_user):
+    """A second upload of the same filename must be rejected with 409."""
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        first = client.post("/api/v1/_uploads", json={"files": [{"filename": "dup.txt"}]})
+        assert first.status_code == 201
+        second = client.post("/api/v1/_uploads", json={"files": [{"filename": "dup.txt"}]})
+    assert second.status_code == 409
+
+
 def test_init_returns_proxy_url_when_enabled(fake_backend, fake_session, authed_user, monkeypatch):
     from fusionserve.config import settings
 
@@ -314,7 +363,7 @@ def test_init_returns_proxy_url_when_enabled(fake_backend, fake_session, authed_
     with TestClient(app) as client:
         response = client.post("/api/v1/_uploads", json={"files": [{"filename": "a.txt"}]})
     url = response.json()["items"][0]["upload_url"]
-    assert "/api/v1/_uploads/_proxy/bucket/2026/01/01/x.bin" in url
+    assert "/api/v1/_uploads/proxy/bucket/2026/01/01/x.bin" in url
     assert "X-Amz-Signature=up" in url
     assert "s3.example" not in url
 
@@ -404,7 +453,7 @@ def test_download_redirects_to_proxy_url_when_enabled(fake_backend, fake_session
         response = client.get(f"/api/v1/_uploads/{row.id}/content", follow_redirects=False)
     assert response.status_code == 302
     location = response.headers["location"]
-    assert "/api/v1/_uploads/_proxy/bucket/2026/01/01/x.bin" in location
+    assert "/api/v1/_uploads/proxy/bucket/2026/01/01/x.bin" in location
     assert "X-Amz-Signature=down" in location
 
 
@@ -450,7 +499,7 @@ def test_proxy_upload_relays_body_to_object_store(fake_backend, fake_session, mo
     app = _build_app(backend=fake_backend, session=fake_session, user=None, with_user=False)
     with TestClient(app) as client:
         response = client.put(
-            "/api/v1/_uploads/_proxy/bucket/2026/01/01/x.bin?X-Amz-Signature=up",
+            "/api/v1/_uploads/proxy/bucket/2026/01/01/x.bin?X-Amz-Signature=up",
             content=b"hello world",
             headers={"Content-Type": "image/png"},
         )
@@ -470,7 +519,7 @@ def test_proxy_download_streams_body_from_object_store(fake_backend, fake_sessio
     monkeypatch.setattr(controller_module, "httpx", _FakeHttpx)
     app = _build_app(backend=fake_backend, session=fake_session, user=None, with_user=False)
     with TestClient(app) as client:
-        response = client.get("/api/v1/_uploads/_proxy/bucket/2026/01/01/x.bin?X-Amz-Signature=down")
+        response = client.get("/api/v1/_uploads/proxy/bucket/2026/01/01/x.bin?X-Amz-Signature=down")
     assert response.status_code == 200
     assert response.content == b"filedata"
     assert response.headers["content-type"].startswith("text/plain")

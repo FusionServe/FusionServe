@@ -18,18 +18,19 @@ Uploads are **direct-to-store** and two-phase:
 
 Downloads issue a 302 to a presigned GET URL. When
 ``settings.storage_proxy_urls`` is on, both the upload and download URLs
-are rewritten to point at this controller's ``_proxy`` relay, so clients
-never contact the object store directly (see
-:mod:`fusionserve.files.proxy`).
+are rewritten to point at this controller's ``proxy`` relay, so clients
+never contact the object store directly.
 """
 
 from __future__ import annotations
 
 import datetime
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 import httpx
 import litestar
@@ -39,6 +40,7 @@ from litestar.exceptions import ClientException, NotAuthorizedException, NotFoun
 from litestar.response import Redirect, Stream
 from litestar.status_codes import HTTP_201_CREATED
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeMeta
 
@@ -46,8 +48,6 @@ from .. import auth
 from ..config import settings
 from ..persistence import set_role
 from ..storage import StorageBackend
-from .keys import make_storage_key
-from .proxy import build_target_url, rewrite_to_proxy
 
 _logger = logging.getLogger(settings.app_name)
 
@@ -81,8 +81,13 @@ class InitUploadFile(BaseModel):
     """One file descriptor in an upload-init request.
 
     Attributes:
-        filename: Original client filename (stored for display only; the
-            storage key is always server-generated).
+        filename: Client filename, used as the storage key after
+            sanitizing: directory structure is preserved, control
+            characters and any leading ``./`` are stripped, and runs of
+            two or more dots are collapsed to one so ``..`` traversal is
+            neutralized. Keys form a global namespace — a duplicate is
+            rejected with 409 (the metadata table enforces
+            ``UNIQUE(storage_key)``).
         content_type: MIME type the object will be stored with. Bound
             into the presigned URL, so the client must upload with a
             matching ``Content-Type`` header.
@@ -155,9 +160,18 @@ def build_controller(
     presign_ttl = settings.storage_s3.presign_ttl_seconds
 
     def _maybe_proxy(url: str, request: Request[Any, Any, Any]) -> str:
-        if settings.storage_proxy_urls:
-            return rewrite_to_proxy(url, request_base_url=str(request.base_url))
-        return url
+        """Origin-swap ``url`` onto the ``proxy`` relay when proxying is on.
+
+        The object store's ``scheme://host`` is replaced with FusionServe's
+        own base plus the relay prefix, while the path and query (which
+        carry the presigned signature) are preserved verbatim.
+        """
+        if not settings.storage_proxy_urls:
+            return url
+        parts = urlsplit(url)
+        base = str(request.base_url).rstrip("/")
+        proxied = f"{base}{settings.base_path}/v1/_uploads/proxy{parts.path}"
+        return f"{proxied}?{parts.query}" if parts.query else proxied
 
     class FilesController(litestar.Controller):
         """Auto-built controller for direct-to-store uploads and downloads."""
@@ -192,7 +206,15 @@ def build_controller(
             items: list[UploadTicketItem] = []
             for file in data.files:
                 content_type = file.content_type or "application/octet-stream"
-                key = make_storage_key(content_type)
+                # The storage key is the client filename, sanitized: directory
+                # structure is preserved (``/`` kept), control characters are
+                # stripped (spaces/unicode kept), any leading ``./`` is removed,
+                # and runs of 2+ dots are collapsed to a single dot so ``..``
+                # path traversal cannot survive anywhere in the path.
+                # ``UNIQUE(storage_key)`` enforces the 409 below.
+                filename = file.filename.replace("\\", "/")
+                cleaned = "".join(ch for ch in filename if ch.isprintable()).strip().lstrip("./")
+                key = re.sub(r"\.{2,}", ".", cleaned)[:200]
                 ticket = await storage.generate_upload_url(key, content_type=content_type, expires_in=presign_ttl)
                 row = orm_class(
                     filename=file.filename,
@@ -205,7 +227,14 @@ def build_controller(
                     uploaded_by=request.user.id,
                 )
                 session.add(row)
-                await session.flush()
+                try:
+                    await session.flush()
+                except IntegrityError as exc:
+                    await session.rollback()
+                    raise ClientException(
+                        status_code=409,
+                        detail=f"an upload named {key!r} already exists",
+                    ) from exc
                 items.append(
                     UploadTicketItem(
                         id=row.id,
@@ -275,7 +304,7 @@ def build_controller(
             description=(
                 "Return a 302 redirect to a presigned GET URL. When "
                 "URL-proxying is enabled the redirect points at the "
-                "``_proxy`` relay instead of the object store."
+                "``proxy`` relay instead of the object store."
             ),
             security=[{"BearerToken": []}],
             raises=[NotFoundException],
@@ -333,7 +362,7 @@ def build_controller(
         # is the capability, exactly like a raw presigned URL.
 
         @litestar.put(
-            path="/_proxy/{s3path:path}",
+            path="/proxy/{s3path:path}",
             summary="Relay a direct upload to the object store",
             include_in_schema=False,
             opt={"exclude_from_auth": True},
@@ -346,7 +375,9 @@ def build_controller(
         ) -> Response[bytes]:
             """Stream the request body to the presigned object-store URL."""
             origin = await storage.object_origin()
-            target = build_target_url(origin, s3path, request.url.query)
+            target = f"{origin.rstrip('/')}/{s3path.lstrip('/')}"
+            if request.url.query:
+                target = f"{target}?{request.url.query}"
             headers: dict[str, str] = {}
             content_type = request.headers.get("content-type")
             if content_type:
@@ -365,7 +396,7 @@ def build_controller(
             return Response(content=b"", status_code=upstream.status_code, headers=resp_headers)
 
         @litestar.get(
-            path="/_proxy/{s3path:path}",
+            path="/proxy/{s3path:path}",
             summary="Relay a download from the object store",
             include_in_schema=False,
             opt={"exclude_from_auth": True},
@@ -377,7 +408,9 @@ def build_controller(
         ) -> Stream:
             """Stream the object-store response back to the client."""
             origin = await storage.object_origin()
-            target = build_target_url(origin, s3path, request.url.query)
+            target = f"{origin.rstrip('/')}/{s3path.lstrip('/')}"
+            if request.url.query:
+                target = f"{target}?{request.url.query}"
             client = httpx.AsyncClient(timeout=None)
             upstream = await client.send(client.build_request("GET", target), stream=True)
             if upstream.status_code >= 400:

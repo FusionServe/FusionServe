@@ -103,9 +103,10 @@ class Settings(BaseSettings):
     #: rejected. Also bounds the proxy relay when proxying is enabled.
     storage_max_single_file_bytes: int = 100 * 1024 * 1024
     #: When true, presigned upload/download URLs handed to clients are
-    #: rewritten to point at FusionServe's own HTTP proxy (see
-    #: :mod:`fusionserve.files.proxy`) instead of the object store, so
-    #: clients never talk to the object store directly. Off by default.
+    #: rewritten to point at FusionServe's own HTTP proxy (the ``proxy``
+    #: relay in :mod:`fusionserve.files.controller`) instead of the object
+    #: store, so clients never talk to the object store directly. Off by
+    #: default.
     storage_proxy_urls: bool = False
     #: Nested S3 settings (``STORAGE_S3__BUCKET=…`` etc.).
     storage_s3: S3Settings = S3Settings()

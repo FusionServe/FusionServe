@@ -171,10 +171,10 @@ process will not come up without the database.
     is named `attributes` **not** `metadata` — a column named
     `metadata` collides with SQLAlchemy's reserved Declarative
     attribute and breaks automap introspection at startup.
-  - Optional HTTP proxy (`STORAGE_PROXY_URLS=true`,
-    `fusionserve.files.proxy`): the presigned upload/download URLs are
-    origin-swapped to `<base_path>/v1/_uploads/_proxy/...` (path+query
-    preserved so the signature stays valid); the `_proxy` relay
+  - Optional HTTP proxy (`STORAGE_PROXY_URLS=true`, the `proxy` relay
+    in `fusionserve.files.controller`): the presigned upload/download URLs are
+    origin-swapped to `<base_path>/v1/_uploads/proxy/...` (path+query
+    preserved so the signature stays valid); the `proxy` relay
     handlers reconstruct the target from `StorageBackend.object_origin()`
     (never from client input — anti-SSRF) and stream via `httpx`. The
     relay routes carry `opt={"exclude_from_auth": True}` and set a

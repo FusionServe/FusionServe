@@ -15,7 +15,7 @@ the client a **presigned upload URL** (``generate_upload_url``) and a
 to the object store directly. ``stat`` verifies an object after upload,
 ``delete`` removes it, and ``object_origin`` exposes the canonical
 ``scheme://host`` the backend's presigned URLs point at so the optional
-HTTP proxy (see :mod:`fusionserve.files.proxy`) can relay to it.
+HTTP proxy (in :mod:`fusionserve.files.controller`) can relay to it.
 """
 
 from __future__ import annotations

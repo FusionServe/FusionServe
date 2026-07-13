@@ -38,24 +38,27 @@ Uploads are **two-phase**:
                                           UPDATE row SET size/etag, status='completed'
 ```
 
-Downloads issue a **302 redirect** to a presigned GET URL. The blob keys
-are **server-generated** (`YYYY/MM/DD/<uuid4><ext>`); clients never get
-to choose the path under which their bytes end up.
+Downloads issue a **302 redirect** to a presigned GET URL. The blob key
+is the **sanitized client filename**: directory structure is preserved,
+control characters and any leading `./` are stripped, and runs of two or
+more dots are collapsed to one so `..` traversal is neutralized anywhere
+in the path. Keys therefore form a global namespace: a duplicate is
+rejected with `409` (the metadata table enforces `UNIQUE(storage_key)`).
 
 ### Optional HTTP proxy
 
 When `STORAGE_PROXY_URLS=true`, the `upload_url` returned by *init* and
 the redirect target of *download* are **origin-swapped**: the object
 store's `scheme://host` is replaced with FusionServe's own base plus a
-`_proxy` path prefix, while the path and query (which carry the
+`proxy` path prefix, while the path and query (which carry the
 `X-Amz-*` signature) are preserved verbatim. The client hits that URL
 and FusionServe relays the request/response to the real object store, so
 **clients never contact the object store directly** — useful when the
 store is on a private network or blocked by client-side egress policy.
 
 ```
-client ── PUT ──▶ /api/v1/_uploads/_proxy/<key>?X-Amz-...  ── relay ──▶ S3
-client ── GET ──▶ /api/v1/_uploads/_proxy/<key>?X-Amz-...  ◀── stream ── S3
+client ── PUT ──▶ /api/v1/_uploads/proxy/<key>?X-Amz-...  ── relay ──▶ S3
+client ── GET ──▶ /api/v1/_uploads/proxy/<key>?X-Amz-...  ◀── stream ── S3
 ```
 
 The relay reconstructs the object-store URL solely from the backend's
@@ -79,7 +82,7 @@ CREATE TABLE app_public.uploads (
     filename        text NOT NULL,
     content_type    text NOT NULL,
     size_bytes      bigint CHECK (size_bytes >= 0),   -- NULL until completed
-    storage_key     text NOT NULL UNIQUE,
+    storage_key     text NOT NULL UNIQUE,        -- the sanitized filename; UNIQUE => 409 on duplicate
     storage_backend text NOT NULL,
     status          text NOT NULL DEFAULT 'pending',  -- 'pending' | 'completed'
     etag            text,                             -- filled at complete
@@ -161,7 +164,7 @@ the endpoint.
 | `POST`   | `/api/v1/_uploads/{id}/complete`| Finalize: verify the object, record size/etag, mark `completed`. Optional body `{attributes}` overwrites the JSONB bag. |
 | `GET`    | `/api/v1/_uploads/{id}/content` | 302 redirect to a presigned GET URL (or its proxied form). |
 | `DELETE` | `/api/v1/_uploads/{id}`         | Cascading delete: blob first, then metadata row. |
-| `PUT`/`GET` | `/api/v1/_uploads/_proxy/{path}` | Internal relay used only when `STORAGE_PROXY_URLS=true`; not called directly. |
+| `PUT`/`GET` | `/api/v1/_uploads/proxy/{path}` | Internal relay used only when `STORAGE_PROXY_URLS=true`; not called directly. |
 
 ### Upload (two-phase)
 
@@ -212,7 +215,7 @@ curl -L http://localhost:8001/api/v1/_uploads/8c5b6e54-.../content \
 ```
 
 The endpoint 302-redirects to a presigned GET URL. With
-`STORAGE_PROXY_URLS=true` the redirect points at the `_proxy` relay and
+`STORAGE_PROXY_URLS=true` the redirect points at the `proxy` relay and
 the bytes stream back through FusionServe.
 
 ### Delete
