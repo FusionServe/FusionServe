@@ -459,12 +459,20 @@ def build(introspection: Introspection):
     Query.__annotations__ = {}
     Mutation.__annotations__ = {}
 
-    # Iterate in a stable, name-sorted order. ``automap``'s class collection has
-    # no guaranteed iteration order across processes, and the order determines
-    # which side of a bidirectional relationship gets its ``object`` filter wired
-    # (see the spec's friction log). Sorting keeps the generated schema shape
-    # deterministic across restarts/deploys.
-    orm_classes = sorted(introspection.base.classes, key=lambda c: c.__table__.name)
+    # Iterate in foreign-key dependency order (``MetaData.sorted_tables`` yields
+    # referenced tables before the tables that reference them). This is
+    # deterministic per schema (``automap``'s class collection has no guaranteed
+    # iteration order across processes) and registers "leaf" models first, so a
+    # bidirectional relationship's ``object`` filter is wired on the referencing
+    # side (e.g. ``booksFilter.object.author``); ``sorted_tables`` still returns a
+    # total order for FK cycles. ``sorted_tables`` includes reflected tables with
+    # no mapped class (unmapped views, automap-collapsed association tables), so
+    # skip any name absent from ``base.classes``.
+    orm_classes = [
+        introspection.base.classes[table.name]
+        for table in introspection.base.metadata.sorted_tables
+        if table.name in introspection.base.classes
+    ]
 
     # ---- Loop A: register filter/order types and pre-create bare type classes. ----
     # The backend keys filter/order types in per-instance registries; cyclic

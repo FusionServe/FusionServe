@@ -20,7 +20,7 @@ Queries via `GET` are disabled; only `POST` requests are accepted.
 
 ## Schema Generation
 
-At startup, [`build()`](../../src/fusionserve/graphql.py) iterates the introspected automap classes (in a stable, name-sorted order) in two passes:
+At startup, [`build()`](../../src/fusionserve/graphql.py) iterates the introspected automap classes (in foreign-key dependency order via `metadata.sorted_tables`) in two passes:
 
 1. **Loop A** — registers a native `orm.filter` and `orm.order` input type per table and pre-creates a bare GraphQL type class for every table (so cyclic relationships resolve).
 2. **Loop B** — decorates each type with `orm.type(...)`, applies smart-comment descriptions, and attaches its root fields (connection/pk query + CRUD mutations).
@@ -74,7 +74,7 @@ column values).
 
 Filters are native `@oneOf` trees (`field`, `object`, `all`, `any`, `not`, `oneOf`); ordering is a list of `@oneOf` entries. See the [strawberry-orm docs](https://pypi.org/project/strawberry-orm/) for the full lookup shapes.
 
-> **Known limitation:** for a bidirectional (automap) relationship only one direction exposes a nested `object` filter; the wired direction is deterministic (name-sorted registration). See the design spec's friction log.
+> **Known limitation:** for a bidirectional (automap) relationship only one direction exposes a nested `object` filter; the wired direction is deterministic (foreign-key dependency-order registration). See the design spec's friction log.
 
 ---
 
