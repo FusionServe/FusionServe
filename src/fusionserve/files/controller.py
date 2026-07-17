@@ -40,7 +40,7 @@ from litestar.exceptions import ClientException, NotAuthorizedException, NotFoun
 from litestar.response import Redirect, Stream
 from litestar.status_codes import HTTP_201_CREATED
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeMeta
 
@@ -85,15 +85,19 @@ class InitUploadFile(BaseModel):
             sanitizing: directory structure is preserved, control
             characters and any leading ``./`` are stripped, and runs of
             two or more dots are collapsed to one so ``..`` traversal is
-            neutralized. Keys form a global namespace — a duplicate is
-            rejected with 409 (the metadata table enforces
-            ``UNIQUE(storage_key)``).
+            neutralized. Keys form a global namespace — a filename
+            already present in the table is skipped (no item is returned
+            for it), since the batch insert upserts on
+            ``UNIQUE(storage_key)``.
         content_type: MIME type the object will be stored with. Bound
             into the presigned URL, so the client must upload with a
             matching ``Content-Type`` header.
         attributes: Optional arbitrary JSON metadata stored alongside the
             row. May be overridden at complete time.
     """
+
+    def __hash__(self):
+        return hash(self.filename)
 
     filename: str
     content_type: str = "application/octet-stream"
@@ -103,7 +107,7 @@ class InitUploadFile(BaseModel):
 class InitUploadRequest(BaseModel):
     """Body of ``POST /_uploads``: one or more files to authorize."""
 
-    files: list[InitUploadFile] = Field(default_factory=list)
+    files: set[InitUploadFile] = Field(default_factory=set)
 
 
 class UploadTicketItem(BaseModel):
@@ -186,7 +190,9 @@ def build_controller(
                 "return a presigned upload URL. The client uploads the "
                 "bytes directly to the returned ``upload_url`` (sending "
                 "the returned ``headers``), then calls "
-                "``POST /_uploads/{id}/complete``."
+                "``POST /_uploads/{id}/complete``. Filenames already "
+                "present in the table are skipped (idempotent upsert), "
+                "so the response may contain fewer items than submitted."
             ),
             security=[{"BearerToken": []}],
             status_code=HTTP_201_CREATED,
@@ -197,56 +203,72 @@ def build_controller(
             request: Request[auth.User, str, State],
             data: InitUploadRequest,
         ) -> InitBatchResponse:
-            """Sign an upload URL and persist a pending row per file."""
+            """Batch-insert a pending row per file and sign an upload URL."""
             if request.user is None:
                 raise NotAuthorizedException("Authentication required to upload files")
             if not data.files:
                 raise ClientException("no files in request")
             await set_role(session, request.user)
-            items: list[UploadTicketItem] = []
+
+            # Prepare rows, storage key is the client filename, sanitized:
+            # directory structure is preserved (``/`` kept), control
+            # characters are stripped (spaces/unicode kept), any leading ``./``
+            # is removed, and runs of 2+ dots are collapsed to a single dot so
+            # ``..`` path traversal cannot survive anywhere in the path.
+            rows: list[dict[str, Any]] = []
             for file in data.files:
                 content_type = file.content_type or "application/octet-stream"
-                # The storage key is the client filename, sanitized: directory
-                # structure is preserved (``/`` kept), control characters are
-                # stripped (spaces/unicode kept), any leading ``./`` is removed,
-                # and runs of 2+ dots are collapsed to a single dot so ``..``
-                # path traversal cannot survive anywhere in the path.
-                # ``UNIQUE(storage_key)`` enforces the 409 below.
                 filename = file.filename.replace("\\", "/")
                 cleaned = "".join(ch for ch in filename if ch.isprintable()).strip().lstrip("./")
                 key = re.sub(r"\.{2,}", ".", cleaned)[:200]
-                ticket = await storage.generate_upload_url(key, content_type=content_type, expires_in=presign_ttl)
-                row = orm_class(
-                    filename=file.filename,
-                    content_type=content_type,
-                    size_bytes=None,
-                    storage_key=key,
-                    storage_backend=backend_name,
-                    status="pending",
-                    attributes=file.attributes,
-                    uploaded_by=request.user.id,
+                rows.append(
+                    {
+                        "filename": file.filename,
+                        "content_type": content_type,
+                        "size_bytes": None,
+                        "storage_key": key,
+                        "storage_backend": backend_name,
+                        "status": "pending",
+                        "attributes": file.attributes,
+                        "uploaded_by": request.user.id,
+                    }
                 )
-                session.add(row)
-                try:
-                    await session.flush()
-                except IntegrityError as exc:
-                    await session.rollback()
-                    raise ClientException(
-                        status_code=409,
-                        detail=f"an upload named {key!r} already exists",
-                    ) from exc
+
+            # Single batched upsert. Keys already present in the table are
+            # skipped (no row returned) rather than raising a conflict.
+            results = (
+                (
+                    await session.execute(
+                        pg_insert(orm_class)
+                        .values(rows)
+                        .on_conflict_do_nothing(index_elements=["storage_key"])
+                        .returning(orm_class)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            await session.commit()
+
+            # Build the response only for rows we actually inserted; skipped
+            # (already-present) filenames simply do not appear. Sign the
+            # presigned URL only for those.
+            items: list[UploadTicketItem] = []
+            for row in results:
+                ticket = await storage.generate_upload_url(
+                    row.storage_key, content_type=row.content_type, expires_in=presign_ttl
+                )
                 items.append(
                     UploadTicketItem(
                         id=row.id,
-                        filename=file.filename,
-                        storage_key=key,
+                        filename=row.filename,
+                        storage_key=row.storage_key,
                         upload_url=_maybe_proxy(ticket.url, request),
                         method=ticket.method,
                         headers=ticket.headers,
                         expires_at=ticket.expires_at,
                     )
                 )
-            await session.commit()
             return InitBatchResponse(items=items)
 
         @litestar.post(

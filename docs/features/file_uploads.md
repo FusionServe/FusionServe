@@ -42,8 +42,10 @@ Downloads issue a **302 redirect** to a presigned GET URL. The blob key
 is the **sanitized client filename**: directory structure is preserved,
 control characters and any leading `./` are stripped, and runs of two or
 more dots are collapsed to one so `..` traversal is neutralized anywhere
-in the path. Keys therefore form a global namespace: a duplicate is
-rejected with `409` (the metadata table enforces `UNIQUE(storage_key)`).
+in the path. Keys therefore form a global namespace: `init` performs a
+single batched upsert, so a filename already present in the table is
+silently skipped (no item for it in the response) rather than erroring
+(the metadata table enforces `UNIQUE(storage_key)`).
 
 ### Optional HTTP proxy
 
@@ -82,7 +84,7 @@ CREATE TABLE app_public.uploads (
     filename        text NOT NULL,
     content_type    text NOT NULL,
     size_bytes      bigint CHECK (size_bytes >= 0),   -- NULL until completed
-    storage_key     text NOT NULL UNIQUE,        -- the sanitized filename; UNIQUE => 409 on duplicate
+    storage_key     text NOT NULL UNIQUE,        -- the sanitized filename; UNIQUE => upsert skips duplicates
     storage_backend text NOT NULL,
     status          text NOT NULL DEFAULT 'pending',  -- 'pending' | 'completed'
     etag            text,                             -- filled at complete

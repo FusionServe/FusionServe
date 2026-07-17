@@ -20,12 +20,31 @@ from litestar import Litestar
 from litestar.di import Provide
 from litestar.testing import TestClient
 from litestar.types import ASGIApp, Receive, Scope, Send
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import JSON, BigInteger, Column, DateTime, MetaData, String, Table
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fusionserve.auth import User
 from fusionserve.files.controller import build_controller
 from fusionserve.storage.base import StorageObject, UploadTicket
+
+# A real Core table so ``pg_insert(orm_class)`` compiles; the fake session
+# intercepts ``execute`` so the statement is never run against a database.
+_UPLOADS_TABLE = Table(
+    "uploads",
+    MetaData(),
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("filename", String),
+    Column("content_type", String),
+    Column("size_bytes", BigInteger),
+    Column("storage_key", String, unique=True),
+    Column("storage_backend", String),
+    Column("status", String),
+    Column("etag", String),
+    Column("attributes", JSON),
+    Column("uploaded_by", UUID(as_uuid=True)),
+    Column("uploaded_at", DateTime(timezone=True)),
+)
 
 _UPLOAD_URL = "https://s3.example/bucket/2026/01/01/x.bin?X-Amz-Signature=up"
 _DOWNLOAD_URL = "https://s3.example/bucket/2026/01/01/x.bin?X-Amz-Signature=down"
@@ -83,25 +102,30 @@ class _FakeRow:
         self.uploaded_at = kwargs.get("uploaded_at") or datetime.datetime.now(datetime.UTC)
 
 
+class _FakeScalarResult:
+    """Minimal stand-in for a SQLAlchemy scalar result."""
+
+    def __init__(self, rows: list[_FakeRow]) -> None:
+        self._rows = rows
+
+    def scalars(self) -> _FakeScalarResult:
+        return self
+
+    def all(self) -> list[_FakeRow]:
+        return self._rows
+
+
 class _FakeSession(AsyncSession):
     """In-memory session implementing the slice of AsyncSession we use."""
 
     def __init__(self) -> None:
         self.rows: dict[uuid.UUID, _FakeRow] = {}
-        self._pending: _FakeRow | None = None
 
     def add(self, row: _FakeRow) -> None:
-        self._pending = row
         self.rows[row.id] = row
 
     async def flush(self) -> None:
-        # Emulate the DB's UNIQUE(storage_key) constraint.
-        pending = self._pending
-        if pending is not None and any(
-            other.id != pending.id and other.storage_key == pending.storage_key for other in self.rows.values()
-        ):
-            self.rows.pop(pending.id, None)
-            raise IntegrityError("INSERT", {}, Exception("duplicate key value violates unique constraint"))
+        return None
 
     async def commit(self) -> None:
         return None
@@ -115,7 +139,25 @@ class _FakeSession(AsyncSession):
         return self.rows.get(pk)
 
     async def execute(self, statement):
-        return None
+        """Emulate ``INSERT ... ON CONFLICT (storage_key) DO NOTHING RETURNING *``.
+
+        Rows whose ``storage_key`` already exists (or repeats within the
+        same statement) are skipped; the rest are inserted with a fresh
+        id and returned via ``.scalars().all()``.
+        """
+        if not getattr(statement, "is_insert", False):
+            return _FakeScalarResult([])
+        inserted: list[_FakeRow] = []
+        seen = {row.storage_key for row in self.rows.values()}
+        for values in statement._multi_values[0]:
+            key = values["storage_key"]
+            if key in seen:
+                continue
+            obj = _FakeRow(**values)
+            self.rows[obj.id] = obj
+            seen.add(key)
+            inserted.append(obj)
+        return _FakeScalarResult(inserted)
 
     async def delete(self, row):
         self.rows.pop(row.id, None)
@@ -221,7 +263,7 @@ def _build_app(*, backend, session, user, max_single_file: int | None = None, wi
     if max_single_file is not None:
         settings.storage_max_single_file_bytes = max_single_file
 
-    controller = build_controller(_FakeRow, backend)
+    controller = build_controller(_UPLOADS_TABLE, backend)
 
     async def _session_provider() -> _FakeSession:
         return session
@@ -308,7 +350,8 @@ def test_init_multi_file(fake_backend, fake_session, authed_user):
             json={"files": [{"filename": "a.txt"}, {"filename": "b.bin", "content_type": "application/octet-stream"}]},
         )
     assert response.status_code == 201
-    assert [i["filename"] for i in response.json()["items"]] == ["a.txt", "b.bin"]
+    # ``files`` is a set, so the response order is not guaranteed.
+    assert {i["filename"] for i in response.json()["items"]} == {"a.txt", "b.bin"}
 
 
 def test_init_empty_batch_rejected(fake_backend, fake_session, authed_user):
@@ -338,21 +381,52 @@ def test_init_collapses_mid_path_traversal(fake_backend, fake_session, authed_us
             json={"files": [{"filename": "a/../../b.txt"}, {"filename": "c/..../d.txt"}]},
         )
     assert response.status_code == 201
-    keys = [item["storage_key"] for item in response.json()["items"]]
-    assert keys == ["a/././b.txt", "c/./d.txt"]
+    keys = {item["storage_key"] for item in response.json()["items"]}
+    assert keys == {"a/././b.txt", "c/./d.txt"}
     for key in keys:
         assert ".." not in key
         assert "/" in key
 
 
-def test_init_duplicate_filename_returns_409(fake_backend, fake_session, authed_user):
-    """A second upload of the same filename must be rejected with 409."""
+def test_init_skips_existing_filename(fake_backend, fake_session, authed_user):
+    """A filename already in the table is skipped (no item), not an error."""
     app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
     with TestClient(app) as client:
         first = client.post("/api/v1/_uploads", json={"files": [{"filename": "dup.txt"}]})
         assert first.status_code == 201
+        assert len(first.json()["items"]) == 1
         second = client.post("/api/v1/_uploads", json={"files": [{"filename": "dup.txt"}]})
-    assert second.status_code == 409
+    assert second.status_code == 201
+    assert second.json()["items"] == []
+
+
+def test_init_skips_existing_but_returns_new_in_same_batch(fake_backend, fake_session, authed_user):
+    """A mixed batch returns items only for the newly-inserted filenames."""
+    # Pre-seed an existing row.
+    _seed_pending(fake_session, fake_backend, key="old.txt", uploaded=False)
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/_uploads",
+            json={"files": [{"filename": "old.txt"}, {"filename": "new.txt"}]},
+        )
+    assert response.status_code == 201
+    items = response.json()["items"]
+    assert [item["filename"] for item in items] == ["new.txt"]
+
+
+def test_init_deduplicates_within_batch(fake_backend, fake_session, authed_user):
+    """Two files with the same filename in one request yield a single item."""
+    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/_uploads",
+            json={"files": [{"filename": "same.txt"}, {"filename": "same.txt"}]},
+        )
+    assert response.status_code == 201
+    items = response.json()["items"]
+    assert len(items) == 1
+    assert items[0]["storage_key"] == "same.txt"
 
 
 def test_init_returns_proxy_url_when_enabled(fake_backend, fake_session, authed_user, monkeypatch):
