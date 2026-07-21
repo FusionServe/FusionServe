@@ -32,6 +32,17 @@ uv run pytest -q             # tests
 
 For local iteration use `uv run ruff check --fix .` and `uv run ruff format .`.
 
+## Version control
+
+- **Never `git commit`, `git add … && commit`, amend, or `git push` unless the
+  user explicitly asks in that message.** The maintainer commits themselves.
+  Default behaviour: make the edits, run the CI-parity checks (ruff + pytest),
+  then stop and leave changes in the working tree for the user to review and
+  commit. If a commit seems warranted, ask first — don't do it proactively.
+- When a commit *is* requested, keep it scoped to the intended files, match the
+  repo's commit-message style, and never commit secrets or an unrelated
+  drifted `uv.lock` (see Style & conventions).
+
 ## Running the app
 
 **Don't use `uv run fusionserve`** — the `[project.scripts]` entry points at
