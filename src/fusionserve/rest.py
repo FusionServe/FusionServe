@@ -29,7 +29,7 @@ from strawberry.scalars import JSON as StrawberryJSON
 from . import auth
 from .config import settings
 from .di import create_filter_dependencies
-from .models import AdvancedFilter, FunctionInfo, FunctionReturnKind, Introspection, SmartComment
+from .models import AdvancedFilter, CrudAction, FunctionInfo, FunctionReturnKind, Introspection, SmartComment
 from .persistence import async_session, inflect, pydantic_field_from_column, set_role
 
 _logger = logging.getLogger(settings.app_name)
@@ -397,6 +397,21 @@ def create_controller(orm_class: DeclarativeMeta, is_view: bool = False) -> lite
         del ItemController.update_item
         del ItemController.delete_item
 
+    # Smart-comment ``exclude`` directive: drop the handlers for each suppressed
+    # CRUD action. ``READ`` removes both the list and the get-by-pk endpoints.
+    # ``hasattr`` guards keep this composable with the ``is_view`` strip above.
+    excluded = comment.excluded
+    handlers_by_action = {
+        CrudAction.READ: ("list_items", "get_item"),
+        CrudAction.CREATE: ("create_item",),
+        CrudAction.UPDATE: ("update_item",),
+        CrudAction.DELETE: ("delete_item",),
+    }
+    for action in excluded:
+        for handler_name in handlers_by_action[action]:
+            if hasattr(ItemController, handler_name):
+                delattr(ItemController, handler_name)
+
     return ItemController
 
 
@@ -416,12 +431,21 @@ def build(introspection: Introspection) -> list[litestar.Controller]:
 
     Returns:
         A list of dynamically generated :class:`litestar.Controller` subclasses,
-        one per table in ``introspection.base.classes``.
+        one per table in ``introspection.base.classes``. A table whose
+        smart-comment ``exclude`` directive suppresses every applicable action
+        (e.g. ``exclude: true``) is dropped entirely so no empty controller is
+        mounted.
     """
-    return [
-        create_controller(orm_class, orm_class.__table__.name in introspection.views)
-        for orm_class in introspection.base.classes
-    ]
+    controllers: list[litestar.Controller] = []
+    for orm_class in introspection.base.classes:
+        is_view = orm_class.__table__.name in introspection.views
+        # Views only ever expose reads; tables expose the full CRUD set. Skip
+        # the controller when every applicable action is excluded.
+        applicable = {CrudAction.READ} if is_view else set(CrudAction)
+        if applicable <= SmartComment.from_object(orm_class.__table__).excluded:
+            continue
+        controllers.append(create_controller(orm_class, is_view))
+    return controllers
 
 
 def _python_type_for_rest(t: type) -> Any:

@@ -22,7 +22,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.automap import automap_base
 
-from fusionserve.models import SmartComment
+from fusionserve.models import CrudAction, SmartComment
 from fusionserve.persistence import (
     _assign_view_primary_keys,
     _name_for_collection_relationship,
@@ -104,6 +104,45 @@ def test_parse_comments_invalid_primary_key_raises():
     # Well-formed YAML but invalid metadata: fail-fast per the parsing contract.
     comment = "---\nprimary_key: 123\n---\n"
     table = _make_table(comment=comment)
+    with pytest.raises(ValidationError):
+        SmartComment.from_object(table)
+
+
+# --- exclude directive -------------------------------------------------------
+
+
+def test_exclude_absent_defaults_to_empty():
+    table = _make_table(comment="---\nprimary_key: id\n---\n")
+    result = SmartComment.from_object(table)
+    assert result.metadata is not None
+    assert result.metadata.exclude == frozenset()
+    # No metadata at all also yields an empty set via the convenience property.
+    assert SmartComment.from_object(_make_table(None)).excluded == frozenset()
+
+
+def test_exclude_true_removes_whole_crud_surface():
+    table = _make_table(comment="---\nexclude: true\n---\n")
+    result = SmartComment.from_object(table)
+    assert result.excluded == frozenset(CrudAction)
+
+
+def test_exclude_false_is_empty():
+    table = _make_table(comment="---\nexclude: false\n---\n")
+    assert SmartComment.from_object(table).excluded == frozenset()
+
+
+def test_exclude_bare_string_is_single_action():
+    table = _make_table(comment="---\nexclude: create\n---\n")
+    assert SmartComment.from_object(table).excluded == {CrudAction.CREATE}
+
+
+def test_exclude_list_is_set_of_actions():
+    table = _make_table(comment="---\nexclude: [create, delete]\n---\n")
+    assert SmartComment.from_object(table).excluded == {CrudAction.CREATE, CrudAction.DELETE}
+
+
+def test_exclude_invalid_action_raises():
+    table = _make_table(comment="---\nexclude: nope\n---\n")
     with pytest.raises(ValidationError):
         SmartComment.from_object(table)
 

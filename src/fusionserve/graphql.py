@@ -62,6 +62,7 @@ from .config import settings
 from .connections import build_connection_field, materialize
 from .models import (
     FILTER_OVERRIDES,
+    CrudAction,
     FunctionInfo,
     FunctionReturnKind,
     Introspection,
@@ -528,25 +529,24 @@ def build(introspection: Introspection):
         _apply_descriptions(gql_type, table)
         gql_types[orm_class] = gql_type
 
-        # ---- Query: connection field (cursor + limit/offset pagination). ----
-        conn_field = build_connection_field(
-            orm,
-            orm_class,
-            gql_type,
-            cls.__orm_filter__,
-            cls.__orm_order__,
-            _gql_type_name(orm_class),
-            description=f"List {table_name} with filtering, ordering and pagination.",
-        )
-        setattr(Query, table_name, conn_field)
-
-        # ---- Query: primary-key lookup field. ----
-        _attach_pk_field(Query, orm_class, gql_type)
+        # Smart-comment ``exclude`` directive: suppress the matching root fields.
+        # ---- Query: connection + primary-key fields (both gated on READ). ----
+        if CrudAction.READ not in SmartComment.from_object(table).excluded:
+            conn_field = build_connection_field(
+                orm,
+                orm_class,
+                gql_type,
+                cls.__orm_filter__,
+                cls.__orm_order__,
+                _gql_type_name(orm_class),
+                description=f"List {table_name} with filtering, ordering and pagination.",
+            )
+            setattr(Query, table_name, conn_field)
+            _attach_pk_field(Query, orm_class, gql_type)
 
         # ---- Mutations (views are read-only). ----
         if table_name not in introspection.views:
-            _attach_mutations(Mutation, orm, orm_class, gql_type)
-            has_mutations = True
+            has_mutations = _attach_mutations(Mutation, orm, orm_class, gql_type) or has_mutations
 
     # ---- Custom queries from STABLE/IMMUTABLE PostgreSQL functions. ----
     _attach_function_fields(Query, introspection, gql_types)
@@ -615,15 +615,35 @@ def _pk_argument(table, pk: str) -> StrawberryArgument:
     )
 
 
-def _attach_mutations(mutation_cls: type, orm: StrawberryORM, orm_class: type, gql_type: type) -> None:
+def _attach_mutations(
+    mutation_cls: type,
+    orm: StrawberryORM,
+    orm_class: type,
+    gql_type: type,
+) -> bool:
     """Attach the six CRUD mutations for a table to ``mutation_cls``.
 
     Mirrors the previous implementation's field names and RETURNING-based
     single-roundtrip semantics, but derives input/patch types from
     ``orm.input`` / ``orm.partial`` and filter inputs from ``orm.filter``. The
     empty-``where`` guardrail on ``updateMany`` / ``deleteMany`` is preserved.
+
+    Args:
+        mutation_cls: The root ``Mutation`` class to attach fields to.
+        orm: The strawberry-orm builder instance.
+        orm_class: The automap ORM class the mutations operate on.
+        gql_type: The decorated GraphQL type for ``orm_class``.
+
+    Returns:
+        ``True`` if at least one mutation field was attached, else ``False``.
     """
+
     table = orm_class.__table__
+    skip_create = CrudAction.CREATE in SmartComment.from_object(table).excluded
+    skip_update = CrudAction.UPDATE in SmartComment.from_object(table).excluded
+    skip_delete = CrudAction.DELETE in SmartComment.from_object(table).excluded
+    if skip_create and skip_update and skip_delete:
+        return False
     pks = list(table.primary_key.columns.keys())
     singular = inflect.singular_noun(table.name) or table.name
     # Pure join tables (every column is part of the PK) have no non-PK columns:
@@ -723,25 +743,28 @@ def _attach_mutations(mutation_cls: type, orm: StrawberryORM, orm_class: type, g
     # each field's return type explicitly.
     single = StrawberryAnnotation(gql_type)
     many = StrawberryAnnotation(list[gql_type])
+    attached = False
 
-    create_one = strawberry.mutation(resolver=create_resolver, description=f"Create a new {singular}.")
-    create_one.type_annotation = single
-    setattr(mutation_cls, f"create{to_pascal(singular)}", create_one)
-    _set_resolver_arguments(
-        create_one,
-        [StrawberryArgument("input", None, StrawberryAnnotation(input_type))],
-    )
+    if not skip_create:
+        create_one = strawberry.mutation(resolver=create_resolver, description=f"Create a new {singular}.")
+        create_one.type_annotation = single
+        setattr(mutation_cls, f"create{to_pascal(singular)}", create_one)
+        _set_resolver_arguments(
+            create_one,
+            [StrawberryArgument("input", None, StrawberryAnnotation(input_type))],
+        )
 
-    create_many = strawberry.mutation(resolver=create_many_resolver, description=f"Create many {table.name}.")
-    create_many.type_annotation = many
-    setattr(mutation_cls, f"create{to_pascal(table.name)}", create_many)
-    _set_resolver_arguments(
-        create_many,
-        [StrawberryArgument("inputs", None, StrawberryAnnotation(list[input_type]))],
-    )
+        create_many = strawberry.mutation(resolver=create_many_resolver, description=f"Create many {table.name}.")
+        create_many.type_annotation = many
+        setattr(mutation_cls, f"create{to_pascal(table.name)}", create_many)
+        _set_resolver_arguments(
+            create_many,
+            [StrawberryArgument("inputs", None, StrawberryAnnotation(list[input_type]))],
+        )
+        attached = True
 
     # Update mutations only exist when there are non-PK columns to patch.
-    if has_non_pk:
+    if has_non_pk and not skip_update:
         patch_type = orm.partial(orm_class)
         update_one = strawberry.mutation(resolver=update_resolver, description=f"Update a {singular} by primary key.")
         update_one.type_annotation = single
@@ -764,24 +787,33 @@ def _attach_mutations(mutation_cls: type, orm: StrawberryORM, orm_class: type, g
                 StrawberryArgument("where", None, StrawberryAnnotation(where_type)),
             ],
         )
+        attached = True
 
-    delete_one = strawberry.mutation(resolver=delete_resolver, description=f"Delete a {singular} by primary key.")
-    delete_one.type_annotation = single
-    setattr(mutation_cls, f"delete{to_pascal(singular)}", delete_one)
-    _set_resolver_arguments(delete_one, [_pk_argument(table, pk) for pk in pks])
+    if not skip_delete:
+        delete_one = strawberry.mutation(resolver=delete_resolver, description=f"Delete a {singular} by primary key.")
+        delete_one.type_annotation = single
+        setattr(mutation_cls, f"delete{to_pascal(singular)}", delete_one)
+        _set_resolver_arguments(delete_one, [_pk_argument(table, pk) for pk in pks])
 
-    delete_many = strawberry.mutation(resolver=delete_many_resolver, description=f"Delete many {table.name}.")
-    delete_many.type_annotation = many
-    setattr(mutation_cls, f"delete{to_pascal(table.name)}", delete_many)
-    _set_resolver_arguments(
-        delete_many,
-        [StrawberryArgument("where", None, StrawberryAnnotation(where_type))],
-    )
+        delete_many = strawberry.mutation(resolver=delete_many_resolver, description=f"Delete many {table.name}.")
+        delete_many.type_annotation = many
+        setattr(mutation_cls, f"delete{to_pascal(table.name)}", delete_many)
+        _set_resolver_arguments(
+            delete_many,
+            [StrawberryArgument("where", None, StrawberryAnnotation(where_type))],
+        )
+        attached = True
 
     # ---- Many-to-many link/unlink mutations (one set per association side). ----
-    for rel in orm_class.__mapper__.relationships:
-        if rel.secondary is not None:
-            _attach_m2m_mutations(mutation_cls, orm_class, gql_type, rel)
+    # Link mutations are part of CREATE, unlink of DELETE.
+    if not (skip_create and skip_delete):
+        for rel in orm_class.__mapper__.relationships:
+            if rel.secondary is not None and _attach_m2m_mutations(
+                mutation_cls, orm_class, gql_type, rel, skip_create, skip_delete
+            ):
+                attached = True
+
+    return attached
 
 
 def _split_assoc_pair(pair, secondary) -> tuple:
@@ -794,7 +826,14 @@ def _split_assoc_pair(pair, secondary) -> tuple:
     return (left, right) if right.table is secondary else (right, left)
 
 
-def _attach_m2m_mutations(mutation_cls: type, orm_class: type, gql_type: type, rel) -> None:
+def _attach_m2m_mutations(
+    mutation_cls: type,
+    orm_class: type,
+    gql_type: type,
+    rel,
+    skip_create: bool = False,
+    skip_delete: bool = False,
+) -> bool:
     """Attach plural link/unlink mutations for one side of a many-to-many relation.
 
     automap skips the pure association table, exposing only ``secondary``-based
@@ -809,6 +848,17 @@ def _attach_m2m_mutations(mutation_cls: type, orm_class: type, gql_type: type, r
     affected **local** entities without an extra round-trip. Semantics are
     strict: linking an existing pair errors (PK violation, atomic); unlinking is
     rejected unless every requested pair existed.
+
+    Args:
+        mutation_cls: The root ``Mutation`` class to attach fields to.
+        orm_class: The local automap ORM class.
+        gql_type: The decorated GraphQL type for ``orm_class``.
+        rel: The ``secondary``-based relationship to wire.
+        skip_create: When ``True``, the link mutation is not attached.
+        skip_delete: When ``True``, the unlink mutation is not attached.
+
+    Returns:
+        ``True`` if at least one link/unlink mutation was attached.
     """
     secondary = rel.secondary
     target_orm = rel.mapper.class_
@@ -819,7 +869,7 @@ def _attach_m2m_mutations(mutation_cls: type, orm_class: type, gql_type: type, r
             orm_class.__table__.name,
             rel.key,
         )
-        return
+        return False
 
     local_pk_col, sec_local_col = _split_assoc_pair(rel.synchronize_pairs[0], secondary)
     _target_pk_col, sec_target_col = _split_assoc_pair(rel.secondary_synchronize_pairs[0], secondary)
@@ -889,16 +939,27 @@ def _attach_m2m_mutations(mutation_cls: type, orm_class: type, gql_type: type, r
         return _dedupe(rows)
 
     many_local = StrawberryAnnotation(list[gql_type])
-    create_links = strawberry.mutation(
-        resolver=create_resolver, description=f"Link {local_singular} to {target_plural} (many-to-many)."
-    )
-    create_links.type_annotation = many_local
-    setattr(mutation_cls, f"create{local_singular}{target_plural}", create_links)
-    _set_resolver_arguments(create_links, [StrawberryArgument("inputs", None, StrawberryAnnotation(list[link_input]))])
+    attached = False
+    if not skip_create:
+        create_links = strawberry.mutation(
+            resolver=create_resolver, description=f"Link {local_singular} to {target_plural} (many-to-many)."
+        )
+        create_links.type_annotation = many_local
+        setattr(mutation_cls, f"create{local_singular}{target_plural}", create_links)
+        _set_resolver_arguments(
+            create_links, [StrawberryArgument("inputs", None, StrawberryAnnotation(list[link_input]))]
+        )
+        attached = True
 
-    delete_links = strawberry.mutation(
-        resolver=delete_resolver, description=f"Unlink {local_singular} from {target_plural} (many-to-many)."
-    )
-    delete_links.type_annotation = many_local
-    setattr(mutation_cls, f"delete{local_singular}{target_plural}", delete_links)
-    _set_resolver_arguments(delete_links, [StrawberryArgument("inputs", None, StrawberryAnnotation(list[link_input]))])
+    if not skip_delete:
+        delete_links = strawberry.mutation(
+            resolver=delete_resolver, description=f"Unlink {local_singular} from {target_plural} (many-to-many)."
+        )
+        delete_links.type_annotation = many_local
+        setattr(mutation_cls, f"delete{local_singular}{target_plural}", delete_links)
+        _set_resolver_arguments(
+            delete_links, [StrawberryArgument("inputs", None, StrawberryAnnotation(list[link_input]))]
+        )
+        attached = True
+
+    return attached

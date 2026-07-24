@@ -20,6 +20,23 @@ _FRONTMATTER_PATTERN = re.compile(r"^---\s*$.*^---\s*$.*", re.MULTILINE | re.DOT
 _FRONTMATTER_BOUNDARY = re.compile(r"^---\s*$", re.MULTILINE)
 
 
+class CrudAction(StrEnum):
+    """CRUD action groups that a smart-comment ``exclude`` directive can suppress.
+
+    Each member maps to a set of generated operations on both API surfaces:
+
+    * ``READ`` — REST list + get-by-pk; GraphQL connection + primary-key fields.
+    * ``CREATE`` — REST ``POST``; GraphQL create / create-many / m2m link.
+    * ``UPDATE`` — REST ``PATCH``; GraphQL update / update-many.
+    * ``DELETE`` — REST ``DELETE``; GraphQL delete / delete-many / m2m unlink.
+    """
+
+    CREATE = "create"
+    READ = "read"
+    UPDATE = "update"
+    DELETE = "delete"
+
+
 class ResolverType(Enum):
     """Types of GraphQL resolvers that can be generated for a table."""
 
@@ -202,11 +219,17 @@ class SmartCommentMetadata(BaseModel):
             (which carries no primary key in the PostgreSQL catalogue). A bare
             string is coerced to a single-element list. ``None`` when the
             comment does not declare one.
+        exclude: CRUD actions to suppress from the generated REST API and
+            GraphQL root fields. ``exclude: true`` removes the whole CRUD
+            surface; a bare action string (``exclude: create``) or a list
+            (``exclude: [create, delete]``) removes just those actions. Defaults
+            to an empty set (nothing excluded).
     """
 
     model_config = ConfigDict(extra="ignore")
 
     primary_key: list[str] | None = None
+    exclude: frozenset[CrudAction] = frozenset()
 
     @field_validator("primary_key", mode="before")
     @classmethod
@@ -235,6 +258,37 @@ class SmartCommentMetadata(BaseModel):
             cleaned.append(item.strip())
         return cleaned
 
+    @field_validator("exclude", mode="before")
+    @classmethod
+    def _coerce_exclude(cls, value: Any) -> Any:
+        """Normalize the ``exclude`` directive to a set of :class:`CrudAction`.
+
+        Accepts several YAML shapes:
+
+        * ``None`` / absent / ``False`` -> empty set (nothing excluded).
+        * ``True`` -> every :class:`CrudAction` (whole CRUD surface removed).
+        * a bare string (e.g. ``create``) -> single-element set.
+        * a list of strings (e.g. ``[create, delete]``) -> set of those actions.
+
+        Args:
+            value: The raw ``exclude`` value from the parsed frontmatter.
+
+        Returns:
+            A set of action strings (validated into :class:`CrudAction` members
+            by pydantic) — empty, a subset, or the full set.
+
+        Raises:
+            ValueError: If any entry is not a recognised CRUD action.
+        """
+        if value is None or value is False:
+            return frozenset()
+        if value is True:
+            return frozenset(CrudAction)
+        items = [value] if isinstance(value, str) else value
+        if not isinstance(items, (list, tuple, set, frozenset)):
+            raise ValueError("exclude must be a boolean, an action string, or a list of action strings")
+        return frozenset(items)
+
 
 class SmartComment(BaseModel):
     """Parsed table / column / function comment, optionally with YAML frontmatter.
@@ -246,6 +300,15 @@ class SmartComment(BaseModel):
 
     metadata: SmartCommentMetadata | None = None
     content: str | None = None
+
+    @property
+    def excluded(self) -> frozenset[CrudAction]:
+        """Return the set of CRUD actions to suppress, empty when unset.
+
+        Convenience accessor so callers don't repeat the ``metadata is None``
+        guard around :attr:`SmartCommentMetadata.exclude`.
+        """
+        return self.metadata.exclude if self.metadata else frozenset()
 
     @classmethod
     def from_text(cls, comment: str | None) -> SmartComment:
