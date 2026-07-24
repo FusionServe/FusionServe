@@ -63,8 +63,9 @@ scripts
 tests
 DEVELOPMENT.md
 
-# Frontend (pnpm + Vite) — never copy node_modules or built dist into
+# Frontend (pnpm + Angular) — never copy node_modules or built dist into
 # the build context; the Dockerfile rebuilds the SPA in its own stage.
 ui/node_modules
 ui/dist
+ui/.angular
 src/fusionserve/web/dist

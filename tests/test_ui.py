@@ -70,22 +70,28 @@ def test_spa_handlers_are_excluded_from_auth():
 
 
 def test_render_index_injects_ui_path_base_href(tmp_path, monkeypatch):
-    """``_render_index`` rewrites ``<base href>`` to ``settings.ui_path``."""
+    """``_render_index`` rewrites ``<base href>`` to ``<ui_path>assets/``.
+
+    Angular writes its whole browser bundle — including ``index.html`` — under
+    the build's ``assets/`` subdirectory, so the injected base href points at
+    ``<ui_path>assets/`` and the hashed chunks (referenced relatively) resolve
+    against it.
+    """
     import fusionserve.ui as ui_module
 
-    bundle = tmp_path / "dist"
-    bundle.mkdir()
+    assets = tmp_path / "dist" / "assets"
+    assets.mkdir(parents=True)
     # Mirror the real index.html: a comment that mentions the ``<base href>``
     # element appears *before* the actual ``<base href="/" />`` tag. The
     # injection must rewrite the real tag, not the bare token in the comment.
-    (bundle / "index.html").write_text(
+    (assets / "index.html").write_text(
         "<!doctype html><html><head>"
-        "<!-- the ``<base href>`` element is rewritten to settings.ui_path at serve time -->"
+        "<!-- the ``<base href>`` element is rewritten at serve time -->"
         '<base href="/" /><title>x</title></head>'
-        '<body><script type="module" src="./assets/index.js"></script></body></html>',
+        '<body><script type="module" src="main-abc123.js"></script></body></html>',
         encoding="utf-8",
     )
-    monkeypatch.setattr(ui_module, "_BUNDLE_DIR", bundle)
+    monkeypatch.setattr(ui_module, "_ASSETS_DIR", assets)
     # ``_render_index`` is ``lru_cache``d on no args; clear it so it reads the
     # monkeypatched bundle (and again afterwards so the tmp result doesn't leak).
     _render_index.cache_clear()
@@ -94,11 +100,11 @@ def test_render_index_injects_ui_path_base_href(tmp_path, monkeypatch):
     finally:
         _render_index.cache_clear()
 
-    assert f'<base href="{settings.ui_path}" />' in html
+    assert f'<base href="{settings.ui_path}assets/" />' in html
     # The real tag must be rewritten — not left as the dev-default root base
     # (which is what happens if the regex matches the comment token instead).
     assert '<base href="/" />' not in html
     # Exactly one rewritten base tag (guards against rewriting the comment).
-    assert html.count(f'<base href="{settings.ui_path}"') == 1
+    assert html.count(f'<base href="{settings.ui_path}assets/"') == 1
     # Relative asset URLs are left untouched (they resolve against the base).
-    assert "./assets/index.js" in html
+    assert "main-abc123.js" in html

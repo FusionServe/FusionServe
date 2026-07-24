@@ -1,38 +1,37 @@
-@import "tailwindcss";
+@layer theme, base, components, utilities;
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/preflight.css' layer(base);
+@import 'tailwindcss/utilities.css';
 
+@import '@spartan-ng/brain/hlm-tailwind-preset.css';
 /*
- * Tailwind v4 single-file import. Project-wide custom tokens go into
- * ``@theme`` blocks below as the SPA grows.
- */
-
-/*
- * Class-based dark mode. By default Tailwind v4's ``dark:`` variant keys
- * off ``prefers-color-scheme`` (OS only). Overriding it to match a
- * ``.dark`` class on any ancestor lets the in-app ThemeToggle drive the
- * theme manually while still defaulting to the OS preference (see the
- * inline bootstrap in ``index.html`` and ``lib/theme.ts``).
- */
+* Class-based dark mode. By default Tailwind v4's ``dark:`` variant keys
+* off ``prefers-color-scheme`` (OS only). Overriding it to match a
+* ``.dark`` class on any ancestor lets the in-app ThemeService drive the
+* theme manually while still defaulting to the OS preference (see the
+* inline bootstrap in ``index.html`` and ``core/theme.service.ts``).
+*/
 @custom-variant dark (&:where(.dark, .dark *));
 
 /*
- * Catppuccin theme via token remap.
- *
- * Tailwind v4 utilities compile to ``var(--color-<name>-<shade>)``. By
- * overriding those same variables — Latte under ``:root`` and Mocha under
- * ``.dark`` — every existing ``zinc-*`` / ``blue-*`` / ``red-*`` / ``amber-*``
- * class renders in Catppuccin without touching component markup.
- *
- * The neutral (``zinc``) ramp is monotonic light->dark, which matches how the
- * app uses it in both modes: low numbers are light surfaces (light mode) and
- * light text (dark mode); high numbers are dark text (light mode) and dark
- * surfaces (dark mode).
- *
- * ``--color-white`` is left pure white so ``text-white`` on accent buttons
- * stays legible. Dark-mode primary buttons use a deepened blue (blue-500..700)
- * while links/active states keep the pastel Mocha blue (blue-300/400).
- *
- * Palette source: https://github.com/catppuccin/catppuccin (Latte + Mocha).
- */
+* Catppuccin theme via token remap.
+*
+* Tailwind v4 utilities compile to ``var(--color-<name>-<shade>)``. By
+* overriding those same variables — Latte under ``:root`` and Mocha under
+* ``.dark`` — every existing ``zinc-*`` / ``blue-*`` / ``red-*`` / ``amber-*``
+* class renders in Catppuccin without touching component markup.
+*
+* The neutral (``zinc``) ramp is monotonic light->dark, which matches how the
+* app uses it in both modes: low numbers are light surfaces (light mode) and
+* light text (dark mode); high numbers are dark text (light mode) and dark
+* surfaces (dark mode).
+*
+* ``--color-white`` is left pure white so ``text-white`` on accent buttons
+* stays legible. Dark-mode primary buttons use a deepened blue (blue-500..700)
+* while links/active states keep the pastel Mocha blue (blue-300/400).
+*
+* Palette source: https://github.com/catppuccin/catppuccin (Latte + Mocha).
+*/
 :root {
   color-scheme: light;
 
@@ -147,6 +146,98 @@
 
 html,
 body,
-#root {
+app-root {
   height: 100%;
+}
+
+/*
+ * spartan/ui semantic tokens remapped onto Catppuccin.
+ *
+ * spartan's helm components render against these tokens (``bg-background``,
+ * ``bg-primary``, ``border-border``, …) rather than the raw ``zinc-*`` scale.
+ * By overriding them with Latte (light) / Mocha (dark) values here, the
+ * spartan components (dropdowns, dialogs, buttons) match the Catppuccin
+ * palette the ported markup uses via the ``zinc/blue/red/amber`` remap above.
+ *
+ * Note: ``--primary`` is intentionally the Catppuccin blue with white
+ * foreground in *both* modes (rather than shadcn's light-primary-in-dark), so
+ * primary buttons stay brand-consistent with the app's own ``blue-600`` accents.
+ */
+:root {
+  color-scheme: light;
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans',
+    sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+
+  --radius: 0.625rem;
+
+  /* ---- Latte ---- */
+  --background: #eff1f5; /* base */
+  --foreground: #4c4f69; /* text */
+  --card: #ffffff;
+  --card-foreground: #4c4f69;
+  --popover: #ffffff;
+  --popover-foreground: #4c4f69;
+  --primary: #1e66f5; /* blue */
+  --primary-foreground: #ffffff;
+  --secondary: #ccd0da; /* surface0 */
+  --secondary-foreground: #4c4f69;
+  --muted: #dce0e8; /* crust */
+  --muted-foreground: #6c6f85; /* subtext0 */
+  --accent: #ccd0da; /* surface0 */
+  --accent-foreground: #4c4f69;
+  --destructive: #d20f39; /* red */
+  --border: #bcc0cc; /* surface1 */
+  --input: #bcc0cc;
+  --ring: #1e66f5;
+  --sidebar: #e6e9ef; /* mantle */
+  --sidebar-foreground: #4c4f69;
+  --sidebar-primary: #1e66f5;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #ccd0da;
+  --sidebar-accent-foreground: #4c4f69;
+  --sidebar-border: #bcc0cc;
+  --sidebar-ring: #1e66f5;
+}
+
+:root.dark {
+  color-scheme: dark;
+
+  /* ---- Mocha ---- */
+  --background: #1e1e2e; /* base */
+  --foreground: #cdd6f4; /* text */
+  --card: #181825; /* mantle */
+  --card-foreground: #cdd6f4;
+  --popover: #313244; /* surface0 — matches the app's dark menus */
+  --popover-foreground: #cdd6f4;
+  --primary: #4f7df0; /* deepened blue (white text legible) */
+  --primary-foreground: #ffffff;
+  --secondary: #313244; /* surface0 */
+  --secondary-foreground: #cdd6f4;
+  --muted: #313244;
+  --muted-foreground: #a6adc8; /* subtext0 */
+  --accent: #45475a; /* surface1 */
+  --accent-foreground: #cdd6f4;
+  --destructive: #e64d75; /* red */
+  --border: #45475a; /* surface1 */
+  --input: #45475a;
+  --ring: #89b4fa; /* Mocha blue */
+  --sidebar: #181825; /* mantle */
+  --sidebar-foreground: #cdd6f4;
+  --sidebar-primary: #4f7df0;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #45475a;
+  --sidebar-accent-foreground: #cdd6f4;
+  --sidebar-border: #45475a;
+  --sidebar-ring: #89b4fa;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
 }

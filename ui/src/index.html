@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      The SPA uses browser-history (path) routing. ``<base href>`` makes the
+      relative ``assets/...`` URLs Angular emits resolve against the mount
+      directory regardless of the current deep route. This default ``/`` is
+      used in dev; in production the backend rewrites it to
+      ``settings.ui_path`` + ``assets/`` (see ``fusionserve.ui``), and the
+      router base is derived from it via ``APP_BASE_HREF``.
+    -->
+    <base href="/" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>FusionServe</title>
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+    <script>
+      // Apply the persisted theme before first paint to avoid a
+      // flash-of-wrong-theme. Mirrors the logic in ``src/app/core/theme.service.ts``;
+      // keep the two in sync (storage key ``theme``, values
+      // ``light`` | ``dark`` | ``system``/absent).
+      (function () {
+        try {
+          var stored = localStorage.getItem("theme");
+          var prefersDark = window.matchMedia(
+            "(prefers-color-scheme: dark)",
+          ).matches;
+          var dark = stored === "dark" || (stored !== "light" && prefersDark);
+          document.documentElement.classList.toggle("dark", dark);
+        } catch (e) {
+          /* localStorage unavailable (e.g. private mode): fall back to CSS. */
+        }
+      })();
+    </script>
+  </head>
+  <body class="h-full bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100">
+    <app-root class="h-full"></app-root>
+  </body>
+</html>

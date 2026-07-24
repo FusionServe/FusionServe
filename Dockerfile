@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ============================================================================
-# Stage 1 — Frontend: build the React SPA with pnpm
+# Stage 1 — Frontend: build the Angular SPA with pnpm
 # ============================================================================
 # pnpm is the only supported JS package manager (see AGENTS.md). The pnpm
 # version is pinned via ``packageManager`` in ``ui/package.json`` and

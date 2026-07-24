@@ -56,8 +56,9 @@ MANIFEST
 # Environment variables file
 .env
 
-# Frontend (pnpm + Vite) build artefacts
+# Frontend (pnpm + Angular) build artefacts
 ui/node_modules/
 ui/dist/
-ui/.vite/
+ui/.angular/
+ui/out-tsc/
 src/fusionserve/web/dist/

@@ -104,7 +104,7 @@ process will not come up without the database.
 - `update_many` / `delete_many` intentionally raise `ValueError` when the
   resolved `where` condition is `None` (empty filter), to block accidental
   table-wide writes. Don't "fix" this by defaulting to no-op.
-- The bundled React SPA is served by **two** handlers, wired in
+- The bundled Angular SPA is served by **two** handlers, wired in
   `src/fusionserve/ui.py` (`build_spa_route_handler`, which returns a
   sequence — `main.py` does `route_handlers.extend(...)`): (1) an assets
   static-files router at `<ui_path>assets` serving `dist/assets`
@@ -114,15 +114,21 @@ process will not come up without the database.
   `opt={"exclude_from_auth": True}` so the auth middleware skips them via
   its `exclude_opt_key` mechanism — do not add the URL patterns to
   `auth_mw.exclude`.
-- There is no separate asset URL setting. Vite builds with `base: "./"`
-  (see `ui/vite.config.ts`) so `index.html` references chunks via relative
-  URLs (`./assets/...`). Because the SPA uses **path routing**, those
-  resolve against the document's `<base href>` — `index.html` ships
-  `<base href="/">` and `_render_index()` rewrites it to `Settings.ui_path`
-  before serving, so chunks resolve to `<ui_path>/assets/<hash>.<ext>` for
-  any route. The SPA reads its router basepath from `document.baseURI`
-  (`ui/src/lib/router.ts`). This keeps the SPA location-independent —
-  relocating it is a one-setting change (`UI_PATH=…`), no JS rebuild.
+- There is no separate asset URL setting. Angular's application builder is
+  configured with `outputPath.browser = "assets"` (see `ui/angular.json`)
+  so it emits its **whole** browser bundle — hashed chunks, `index.html`,
+  media and the embedded Altair/Stoplight assets — under a single
+  `dist/assets/` prefix, with *relative* asset URLs. This disjoint
+  `assets/` prefix is what keeps the static router from colliding with the
+  `{path:path}` index fallback. Because the SPA uses **path routing**,
+  those relative URLs resolve against the document's `<base href>`:
+  `index.html` ships `<base href="/">` and `_render_index()` rewrites it to
+  `<ui_path>assets/` before serving, so chunks resolve to
+  `<ui_path>assets/<hash>.<ext>`. The Angular router base is derived one
+  level up (`<ui_path>`) from `document.baseURI` via an `APP_BASE_HREF`
+  factory (`ui/src/app/app.config.ts`), so OIDC redirect URIs and router
+  links stay correct. This keeps the SPA location-independent — relocating
+  it is a one-setting change (`UI_PATH=…`), no JS rebuild.
 - Users land on the SPA via a 302 redirect from `settings.base_path`
   (`/api/`) issued by `fusionserve.ui.RedirectRenderPlugin`. That
   plugin is registered as the first entry of
@@ -145,12 +151,13 @@ process will not come up without the database.
   at startup — it 404s at request time if the file is missing. Run
   `pnpm run build` in `ui/` to populate `src/fusionserve/web/dist`
   before serving the SPA in production. Frontend development uses a
-  standalone Vite dev server: `pnpm run dev` in `ui/` starts it at
-  `http://localhost:5173/` with `server.proxy` forwarding `/api/*`
-  requests to the Litestar backend on `:8001` (target hard-coded in
-  `ui/vite.config.ts`). Guardrail: `tests/test_ui.py` pins the
-  assets-router-at-`<ui_path>assets` + index-handler (with `{path:path}`
-  fallback and base-href injection) + `exclude_from_auth=True` shape.
+  standalone Angular dev server: `pnpm run dev` in `ui/` starts it at
+  `http://localhost:5173/` (`port` set in `ui/angular.json`) with
+  `proxyConfig` (`ui/proxy.conf.json`) forwarding `/api/*` and
+  `/.well-known/*` to the Litestar backend on `:8001`. Guardrail:
+  `tests/test_ui.py` pins the assets-router-at-`<ui_path>assets` +
+  index-handler (with `{path:path}` fallback and `<ui_path>assets/`
+  base-href injection) + `exclude_from_auth=True` shape.
 - REST endpoints are versioned under `<base_path>/v1/<table>` (default
   `/api/v1/<table>`); the same `v1` prefix applies to PG-function
   controllers. The version segment is hard-coded in `fusionserve.rest`;
@@ -202,19 +209,18 @@ process will not come up without the database.
     `fusionserve.config`). There is no import-time bucket validation:
     `S3Backend.__init__` raises if `STORAGE_S3__BUCKET` is unset, which
     surfaces at lifespan startup only when the feature is active.
-- The SPA uses **hash routing** (`createHashHistory`) so client-side
-  paths (`/-/#/openapi`, `/-/#/graphql`, …) cannot collide with any
-  future top-level Litestar route. Browser history would also work
-  given the current layout, but hash routing is one fewer thing to
-  reason about.
-- The SPA uses **browser-history (path) routing** (`createBrowserHistory`,
-  `ui/src/lib/router.ts`). Client-side deep links (`<ui_path>data`,
-  `<ui_path>graphql`, …) reload via the index handler's `{path:path}`
-  fallback (dev: Vite's history fallback). The router `basepath` is read
-  from `document.baseURI` (driven by the injected `<base href>`), so no
-  build-time mount constant is needed. Multi-segment SPA paths don't
-  collide with the OpenAPI router's single-segment `<base_path>/{path:str}`
-  not-found handler.
+- The SPA uses Angular's **browser-history (path) routing**
+  (`provideRouter` in `ui/src/app/app.config.ts`). Client-side deep links
+  (`<ui_path>data`, `<ui_path>graphql`, …) reload via the index handler's
+  `{path:path}` fallback (dev: the Angular dev server's history fallback).
+  The router base comes from `APP_BASE_HREF` (a factory that strips the
+  trailing `assets/` off `document.baseURI`), so no build-time mount
+  constant is needed. Multi-segment SPA paths don't collide with the
+  OpenAPI router's single-segment `<base_path>/{path:str}` not-found
+  handler. The two API explorers embed their own IDEs and route
+  internally: Stoplight Elements uses hash routing inside its component,
+  and Altair runs in an isolated iframe — neither touches the Angular
+  router.
 - The canonical OpenAPI document lives at `/api/openapi.json`,
   auto-registered by Litestar's upstream OpenAPI router: none of the
   configured `render_plugins` (Redirect / Swagger / Scalar) claims that
@@ -223,13 +229,20 @@ process will not come up without the database.
   fires. If you ever want to override the media type or behaviour,
   prepend an explicit `JsonRenderPlugin` to `render_plugins` in
   `main.py`.
-- There is no `/api/_meta` endpoint. The SPA used to fetch a runtime
-  introspection catalogue from there; that machinery was removed when
-  the UI scope shrank to "redirect → SPA shell that iframes the
-  backend-served Swagger UI (`/api/swagger`) and GraphiQL
-  (`/api/graphql`) viewers". Future data-fetching features should
-  reintroduce a dedicated endpoint (avoid resurrecting the deleted
-  `MetaResponse` shape verbatim).
+- There is no `/api/_meta` endpoint. The SPA discovers the editable
+  table surface directly from GraphQL introspection
+  (`ui/src/app/lib/data-schema.ts`, run via `DataSchemaService`); there is
+  no bespoke catalogue endpoint. If you add one, avoid resurrecting the
+  long-deleted `MetaResponse` shape verbatim.
+- The SPA's two API explorers are **bundled**, not iframes of the
+  backend viewers: the OpenAPI page renders Stoplight Elements
+  (`<elements-api>`) against `/api/openapi.json`, and the GraphQL page
+  embeds Altair (`altair-static`'s `build/dist` copied to
+  `assets/altair`, booted via `AltairGraphQL.init` inside an iframe
+  `srcdoc`). `altair-static` is a Node-only package — never import it in
+  browser code; only its `build/dist` assets are consumed at runtime.
+  The backend-served Swagger/GraphiQL remain available for direct access
+  but the SPA no longer depends on them.
 
 ## Style & conventions
 
@@ -247,7 +260,7 @@ process will not come up without the database.
 ## Tests
 
 - `tests/` currently has unit coverage for `auth`, `persistence`,
-  `graphql_helpers`, and `ui` (the new `/api/_meta` projector), plus a
+  `graphql_helpers`, and `ui` (the SPA route-handler shape), plus a
   smoke test (`test_skeleton.py`) that just checks `__version__`. Real
   integration tests live in `test_integration_introspection.py` behind the
   `integration` mark and are gated on `RUN_INTEGRATION=1` (CI keeps the

@@ -72,18 +72,17 @@ class Settings(BaseSettings):
 
     ui_enabled: bool = True
     # ---- UI ----
-    #: Public URL where the React SPA is mounted. The OpenAPI router root
+    #: Public URL where the Angular SPA is mounted. The OpenAPI router root
     #: at ``base_path`` issues a 302 redirect here (see
     #: :class:`fusionserve.ui.RedirectRenderPlugin`); the SPA itself is
-    #: served by the Litestar static-files router built by
-    #: :func:`fusionserve.ui.build_spa_route_handler` with
-    #: ``html_mode=True`` so ``index.html`` resolves at the mount root
-    #: and as a fallback for unmatched paths. Hashed JS/CSS chunks
-    #: emitted by Vite use *relative* asset URLs (``./assets/...`` in
-    #: ``index.html``), so they're served by the same router from the
-    #: ``<ui_path>/assets/`` URL space — no separate asset prefix
-    #: setting is needed and the SPA can be relocated by changing only
-    #: ``ui_path``.
+    #: served by the two handlers built by
+    #: :func:`fusionserve.ui.build_spa_route_handler` — an assets
+    #: static-files router at ``<ui_path>assets`` plus a base-href-injecting
+    #: ``index.html`` handler that also serves the deep-link fallback. Angular
+    #: emits its whole browser bundle under ``assets/`` with *relative* asset
+    #: URLs, so the chunks are served from the ``<ui_path>assets/`` URL space
+    #: — no separate asset prefix setting is needed and the SPA can be
+    #: relocated by changing only ``ui_path``.
     #:
     #: The empty-string default is a sentinel: :meth:`_derive_ui_path`
     #: fills it in with ``f"{base_path.rstrip('/')}/-/"`` (default

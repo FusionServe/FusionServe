@@ -5,9 +5,10 @@
 - Python **3.14+**
 - [`uv`](https://docs.astral.sh/uv/) (package manager and project runner)
 - [`pnpm`](https://pnpm.io) (JS package manager for the bundled UI).
-  Node 20+ with `corepack enable` auto-activates the pinned pnpm
-  version from `ui/package.json`'s `packageManager` field — no global
-  `pnpm` install required.
+  Node **24.15+** (required by the Angular v22 CLI) with `corepack
+  enable` auto-activates the pinned pnpm version from
+  `ui/package.json`'s `packageManager` field — no global `pnpm`
+  install required.
 
 > The JS toolchain is **pnpm-only**. Do not run `npm`, `npx`, `bun`,
 > `bunx`, or `yarn` inside `ui/` — install with `pnpm install`, run
@@ -43,7 +44,7 @@ it references), otherwise requests to `settings.ui_path` (default
 `/api/-/`, derived from `base_path`) 404 at request time. Run
 `pnpm run build` in `ui/` to populate it; the dev workflow below
 avoids needing a build at all by serving the SPA from a standalone
-Vite dev server.
+Angular dev server.
 
 ### Frontend dev workflow
 
@@ -55,7 +56,7 @@ pnpm install
 # Two-terminal dev workflow:
 #  - Terminal A: backend
 uv run uvicorn fusionserve.main:app --reload --port 8001 --log-config=logging.yaml
-#  - Terminal B: Vite dev server (proxies /api/* to :8001)
+#  - Terminal B: Angular dev server (proxies /api/* to :8001)
 cd ui && pnpm run dev
 # Then visit http://localhost:5173/
 
@@ -66,13 +67,16 @@ cd ui && pnpm run build
 cd ui && pnpm run typecheck
 ```
 
-The Vite dev server's `server.proxy` (configured in
-`ui/vite.config.ts`) forwards every `/api/*` request — REST CRUD,
-GraphQL, OpenAPI surfaces — to the backend on `:8001`. In dev the SPA
-is reached at the dev-server root (`http://localhost:5173/`), **not**
-at `<ui_path>`; hash routing keeps deep links identical between dev
-and prod apart from the prefix. Hitting `http://localhost:5173/api/`
-in dev follows the proxied 302 to `<ui_path>`, which then serves the
+The Angular dev server's proxy (configured in `ui/proxy.conf.json`)
+forwards every `/api/*` and `/.well-known/*` request — REST CRUD,
+GraphQL, OpenAPI surfaces, the client-config document — to the backend
+on `:8001`. In dev the SPA is reached at the dev-server root
+(`http://localhost:5173/`), **not** at `<ui_path>`; the app uses
+browser-history (path) routing and derives its router base from
+`document.baseURI` (via `APP_BASE_HREF`), so deep links reload cleanly
+in both dev (Angular's history fallback) and prod (the base-href
+injecting index handler). Hitting `http://localhost:5173/api/` in dev
+follows the proxied 302 to `<ui_path>`, which then serves the
 *prebuilt* `index.html` from `web/dist` rather than the HMR-backed
 one — visit the dev-server root directly to stay in HMR.
 
@@ -82,11 +86,12 @@ one — visit the dev-server root directly to stay in HMR.
 |------|-------|-------|
 | `/api/` | `RedirectRenderPlugin` (`fusionserve.ui`) | 302 redirect to `settings.ui_path` (default `/api/-/`). |
 | `/api/openapi.json` | Litestar OpenAPI router | Auto-registered JSON handler (no explicit `JsonRenderPlugin`; the upstream "fallback" path provides it). |
-| `/api/swagger` | `SwaggerRenderPlugin` | Swagger UI. |
+| `/api/swagger` | `SwaggerRenderPlugin` | Swagger UI (the SPA's OpenAPI page uses bundled Stoplight Elements instead). |
 | `/api/scalar` | `ScalarRenderPlugin` | Scalar API reference. |
 | `/api/v1/<table>` | `fusionserve.rest` | Dynamically generated REST CRUD endpoints (`v1` is the API version). |
-| `/api/graphql` | `fusionserve.graphql` | Strawberry GraphQL endpoint + GraphiQL on `GET`. |
-| `<ui_path>` (default `/api/-/`, and any `<ui_path>/{path}`) | Litestar static-files router (`html_mode=True`) | React SPA index + history fallback + hashed Vite assets at `<ui_path>/assets/...` (relative asset URLs in `index.html`). Wired via `Settings.ui_path`. |
+| `/api/graphql` | `fusionserve.graphql` | Strawberry GraphQL endpoint + GraphiQL on `GET` (the SPA's GraphQL page embeds Altair instead). |
+| `<ui_path>assets/...` | Assets static-files router (`fusionserve.ui`) | Angular browser bundle (hashed chunks, `index.html`, embedded Altair/Stoplight assets). |
+| `<ui_path>` (default `/api/-/`, and any `<ui_path>/{path:path}`) | Base-href-injecting index handler (`fusionserve.ui`) | Angular SPA index + deep-link fallback. `<base href>` rewritten to `<ui_path>assets/`; router base derived one level up via `APP_BASE_HREF`. Wired via `Settings.ui_path`. |
 | `/metrics` | Litestar Prometheus | Standard Prometheus exposition. |
 
 `Settings.ui_path` derives from `Settings.base_path` (default

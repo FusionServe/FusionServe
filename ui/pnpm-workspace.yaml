@@ -1,13 +1,19 @@
-# Build-script approvals for transitive dependencies. All are disabled:
-#   - @scarf/scarf            install-time analytics — opted out (see also
-#                             scarfSettings in package.json)
-#   - tree-sitter*, core-js-pure  native/postinstall scripts that are
-#                             irrelevant to the browser bundle Vite produces
-# Setting these to false acknowledges the ignored builds so pnpm does not
-# error (ERR_PNPM_IGNORED_BUILDS) on install / `pnpm run`.
+# Build-script approvals for transitive dependencies. pnpm 11 refuses to run
+# a dependency's install scripts unless it is listed here, and errors
+# (ERR_PNPM_IGNORED_BUILDS) if any ignored build is left unacknowledged.
+#
+#   - esbuild / @parcel/watcher  Angular build + dev-server toolchain; their
+#                                postinstall scripts are allowed to run.
+#   - lmdb / msgpackr-extract    native accelerators (pulled transitively via
+#                                the Stoplight/Altair viewers) that ship pure-JS
+#                                fallbacks, so their native builds are skipped.
+#   - @scarf/scarf               install-time analytics — opted out (see also
+#                                scarfSettings in package.json).
 allowBuilds:
+  '@parcel/watcher': true
   '@scarf/scarf': false
-  '@tree-sitter-grammars/tree-sitter-yaml': false
-  core-js-pure: false
-  tree-sitter: false
-  tree-sitter-json: false
+  esbuild: true
+  less: false
+  lmdb: false
+  msgpackr-extract: false
+  nx: false
