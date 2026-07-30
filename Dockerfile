@@ -8,7 +8,7 @@
 # resolved by corepack at build time. The built artefacts land in
 # ``/out/dist`` and are copied into the Python package directory in the
 # next stage so the wheel ships the SPA.
-FROM docker.io/library/node:24-alpine AS frontend
+FROM docker.io/library/node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd AS frontend
 
 # corepack ships with Node and reads the ``packageManager`` field from
 # ``package.json`` to activate the pinned pnpm version on first
@@ -35,7 +35,7 @@ RUN pnpm run build && \
 # ============================================================================
 # Stage 2 — Builder: resolve and install Python dependencies system-wide
 # ============================================================================
-FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim@sha256:7cf77f594be8042dab6daa9fe326f90962252268b4f120a7f5dccce4d947e6c1 AS builder
 
 # uv: never download Python (image already has it), always copy files
 # (safer across bind-mounts / cross-stage COPY), pre-compile bytecode,
@@ -69,7 +69,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ============================================================================
 # Stage 3 — Runtime: minimal image with only the installed packages + assets
 # ============================================================================
-FROM python:3.14-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30 AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
