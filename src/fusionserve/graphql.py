@@ -53,6 +53,7 @@ from strawberry.litestar import (
     make_graphql_controller,
 )
 from strawberry.scalars import JSON as StrawberryJSON
+from strawberry.schema_directive import Location
 from strawberry.types.arguments import StrawberryArgument
 from strawberry.utils.str_converters import to_camel_case
 from strawberry_orm import StrawberryORM
@@ -80,6 +81,48 @@ _MAX_WHERE_DEPTH = 10
 #: Name of the synthetic module that holds dynamically generated GraphQL type
 #: classes, so cyclic relationship annotations resolve via normal name lookup.
 _GENERATED_MODULE = "fusionserve._graphql_generated"
+
+
+@strawberry.schema_directive(
+    locations=[Location.OBJECT],
+    description="Marks an object type (a whole table) as deprecated; ``reason`` explains why.",
+    name="deprecated",
+)
+class Deprecated:
+    """Schema directive carrying a table's smart-comment deprecation reason.
+
+    Rendered in SDL as ``@deprecated(reason: "…")`` on the object type. Used
+    **only** for object-type (table) deprecation, which GraphQL introspection
+    cannot represent (there is no ``__Type.isDeprecated``) and which the built-in
+    ``@deprecated`` directive cannot annotate either.
+
+    Field-level deprecation (columns, root query/mutation fields, custom-function
+    fields) instead uses Strawberry's built-in ``deprecation_reason`` mechanism
+    (see :func:`_mark_field_deprecated`) so it surfaces via introspection's
+    ``isDeprecated`` / ``deprecationReason``. Keeping this directive ``OBJECT``-only
+    avoids overriding the built-in field-level ``@deprecated`` definition.
+    """
+
+    reason: str
+
+
+def _mark_field_deprecated(field: Any, reason: str | None) -> None:
+    """Mark a Strawberry field deprecated via the built-in mechanism, if ``reason``.
+
+    Sets ``deprecation_reason`` (rather than attaching a schema directive) so the
+    deprecation surfaces in both the printed SDL (``@deprecated(reason: …)``) and
+    GraphQL introspection (``isDeprecated`` / ``deprecationReason``).
+    """
+    if reason:
+        _logger.debug("Marking field %s as deprecated: %s", field.python_name, reason)
+        field.deprecation_reason = reason
+
+
+def _mark_type_deprecated(gql_type: type, reason: str | None) -> None:
+    """Append the :class:`Deprecated` directive to a GraphQL object type, if ``reason``."""
+    if reason:
+        definition = gql_type.__strawberry_definition__
+        definition.directives = [*(definition.directives or ()), Deprecated(reason=reason)]
 
 
 class CustomContext(BaseContext, kw_only=True):
@@ -311,23 +354,28 @@ _patch_strawberry_orm_uuid()
 
 
 def _apply_descriptions(gql_type: type, table: Any) -> None:
-    """Copy smart-comment text onto the type and its column field descriptions.
+    """Copy smart-comment text and deprecation onto the type and its column fields.
 
-    ``orm.type()`` exposes no description hook, so descriptions are applied
-    after decoration by mutating the produced Strawberry definition. The table
-    comment becomes the type description; each column comment becomes the
-    matching field's description. Relationship/non-column fields are untouched.
+    ``orm.type()`` exposes no description hook, so descriptions and deprecation
+    are applied after decoration by mutating the produced Strawberry definition.
+    The table comment becomes the type description; each column comment becomes
+    the matching field's description. A table/column ``deprecated`` directive
+    attaches the :class:`Deprecated` schema directive (rendered as
+    ``@deprecated(reason: …)``) to the type / field. Relationship/non-column
+    fields are untouched.
     """
-    table_comment = SmartComment.from_object(table).content
-    if table_comment:
-        gql_type.__strawberry_definition__.description = table_comment
+    table_comment = SmartComment.from_object(table)
+    if table_comment.content:
+        gql_type.__strawberry_definition__.description = table_comment.content
+    _mark_type_deprecated(gql_type, table_comment.deprecated)
     for column in table.columns:
         field = gql_type.__strawberry_definition__.get_field(column.name)
         if field is None:
             continue
-        content = SmartComment.from_object(column).content
-        if content:
-            field.description = content
+        column_comment = SmartComment.from_object(column)
+        if column_comment.content:
+            field.description = column_comment.content
+        _mark_field_deprecated(field, column_comment.deprecated)
 
 
 class _UnmappableFunctionError(RuntimeError):
@@ -413,6 +461,7 @@ def _attach_function_fields(query_cls: type, introspection: Introspection, gql_t
             description=fn.description or f"Custom query exposing {fn.schema}.{fn.name}().",
         )
         field.type_annotation = StrawberryAnnotation(return_annotation)
+        _mark_field_deprecated(field, fn.metadata.deprecated if fn.metadata else None)
         setattr(query_cls, field_name, field)
         arguments: list[StrawberryArgument] = []
         for p in fn.params:
@@ -529,9 +578,12 @@ def build(introspection: Introspection):
         _apply_descriptions(gql_type, table)
         gql_types[orm_class] = gql_type
 
+        table_comment = SmartComment.from_object(table)
+        deprecated_reason = table_comment.deprecated
+
         # Smart-comment ``exclude`` directive: suppress the matching root fields.
         # ---- Query: connection + primary-key fields (both gated on READ). ----
-        if CrudAction.READ not in SmartComment.from_object(table).excluded:
+        if CrudAction.READ not in table_comment.excluded:
             conn_field = build_connection_field(
                 orm,
                 orm_class,
@@ -541,12 +593,14 @@ def build(introspection: Introspection):
                 _gql_type_name(orm_class),
                 description=f"List {table_name} with filtering, ordering and pagination.",
             )
+            _mark_field_deprecated(conn_field, deprecated_reason)
             setattr(Query, table_name, conn_field)
-            _attach_pk_field(Query, orm_class, gql_type)
+            pk_field = _attach_pk_field(Query, orm_class, gql_type)
+            _mark_field_deprecated(pk_field, deprecated_reason)
 
         # ---- Mutations (views are read-only). ----
         if table_name not in introspection.views:
-            has_mutations = _attach_mutations(Mutation, orm, orm_class, gql_type) or has_mutations
+            has_mutations = _attach_mutations(Mutation, orm, orm_class, gql_type, deprecated_reason) or has_mutations
 
     # ---- Custom queries from STABLE/IMMUTABLE PostgreSQL functions. ----
     _attach_function_fields(Query, introspection, gql_types)
@@ -566,8 +620,13 @@ def build(introspection: Introspection):
     )
 
 
-def _attach_pk_field(query_cls: type, orm_class: type, gql_type: type) -> None:
-    """Attach a primary-key lookup field returning a single record to ``query_cls``."""
+def _attach_pk_field(query_cls: type, orm_class: type, gql_type: type):
+    """Attach a primary-key lookup field returning a single record to ``query_cls``.
+
+    Returns:
+        The created Strawberry field, so callers can attach further metadata
+        (e.g. the :class:`Deprecated` directive).
+    """
     table = orm_class.__table__
     pks = list(table.primary_key.columns.keys())
     pk_field_name = inflect.singular_noun(table.name) or table.name
@@ -599,6 +658,7 @@ def _attach_pk_field(query_cls: type, orm_class: type, gql_type: type) -> None:
             for pk in pks
         ],
     )
+    return field
 
 
 def _set_fields(values: object) -> dict[str, Any]:
@@ -620,6 +680,7 @@ def _attach_mutations(
     orm: StrawberryORM,
     orm_class: type,
     gql_type: type,
+    deprecated_reason: str | None = None,
 ) -> bool:
     """Attach the six CRUD mutations for a table to ``mutation_cls``.
 
@@ -633,6 +694,9 @@ def _attach_mutations(
         orm: The strawberry-orm builder instance.
         orm_class: The automap ORM class the mutations operate on.
         gql_type: The decorated GraphQL type for ``orm_class``.
+        deprecated_reason: When set (from the table's ``deprecated`` smart
+            comment), every generated mutation field carries the
+            :class:`Deprecated` schema directive with this reason.
 
     Returns:
         ``True`` if at least one mutation field was attached, else ``False``.
@@ -748,6 +812,7 @@ def _attach_mutations(
     if not skip_create:
         create_one = strawberry.mutation(resolver=create_resolver, description=f"Create a new {singular}.")
         create_one.type_annotation = single
+        _mark_field_deprecated(create_one, deprecated_reason)
         setattr(mutation_cls, f"create{to_pascal(singular)}", create_one)
         _set_resolver_arguments(
             create_one,
@@ -756,6 +821,7 @@ def _attach_mutations(
 
         create_many = strawberry.mutation(resolver=create_many_resolver, description=f"Create many {table.name}.")
         create_many.type_annotation = many
+        _mark_field_deprecated(create_many, deprecated_reason)
         setattr(mutation_cls, f"create{to_pascal(table.name)}", create_many)
         _set_resolver_arguments(
             create_many,
@@ -768,6 +834,7 @@ def _attach_mutations(
         patch_type = orm.partial(orm_class)
         update_one = strawberry.mutation(resolver=update_resolver, description=f"Update a {singular} by primary key.")
         update_one.type_annotation = single
+        _mark_field_deprecated(update_one, deprecated_reason)
         setattr(mutation_cls, f"update{to_pascal(singular)}", update_one)
         _set_resolver_arguments(
             update_one,
@@ -779,6 +846,7 @@ def _attach_mutations(
 
         update_many = strawberry.mutation(resolver=update_many_resolver, description=f"Update many {table.name}.")
         update_many.type_annotation = many
+        _mark_field_deprecated(update_many, deprecated_reason)
         setattr(mutation_cls, f"update{to_pascal(table.name)}", update_many)
         _set_resolver_arguments(
             update_many,
@@ -792,11 +860,13 @@ def _attach_mutations(
     if not skip_delete:
         delete_one = strawberry.mutation(resolver=delete_resolver, description=f"Delete a {singular} by primary key.")
         delete_one.type_annotation = single
+        _mark_field_deprecated(delete_one, deprecated_reason)
         setattr(mutation_cls, f"delete{to_pascal(singular)}", delete_one)
         _set_resolver_arguments(delete_one, [_pk_argument(table, pk) for pk in pks])
 
         delete_many = strawberry.mutation(resolver=delete_many_resolver, description=f"Delete many {table.name}.")
         delete_many.type_annotation = many
+        _mark_field_deprecated(delete_many, deprecated_reason)
         setattr(mutation_cls, f"delete{to_pascal(table.name)}", delete_many)
         _set_resolver_arguments(
             delete_many,
@@ -809,7 +879,7 @@ def _attach_mutations(
     if not (skip_create and skip_delete):
         for rel in orm_class.__mapper__.relationships:
             if rel.secondary is not None and _attach_m2m_mutations(
-                mutation_cls, orm_class, gql_type, rel, skip_create, skip_delete
+                mutation_cls, orm_class, gql_type, rel, skip_create, skip_delete, deprecated_reason
             ):
                 attached = True
 
@@ -833,6 +903,7 @@ def _attach_m2m_mutations(
     rel,
     skip_create: bool = False,
     skip_delete: bool = False,
+    deprecated_reason: str | None = None,
 ) -> bool:
     """Attach plural link/unlink mutations for one side of a many-to-many relation.
 
@@ -856,6 +927,8 @@ def _attach_m2m_mutations(
         rel: The ``secondary``-based relationship to wire.
         skip_create: When ``True``, the link mutation is not attached.
         skip_delete: When ``True``, the unlink mutation is not attached.
+        deprecated_reason: When set, both link/unlink mutations carry the
+            :class:`Deprecated` schema directive with this reason.
 
     Returns:
         ``True`` if at least one link/unlink mutation was attached.
@@ -945,6 +1018,7 @@ def _attach_m2m_mutations(
             resolver=create_resolver, description=f"Link {local_singular} to {target_plural} (many-to-many)."
         )
         create_links.type_annotation = many_local
+        _mark_field_deprecated(create_links, deprecated_reason)
         setattr(mutation_cls, f"create{local_singular}{target_plural}", create_links)
         _set_resolver_arguments(
             create_links, [StrawberryArgument("inputs", None, StrawberryAnnotation(list[link_input]))]
@@ -956,6 +1030,7 @@ def _attach_m2m_mutations(
             resolver=delete_resolver, description=f"Unlink {local_singular} from {target_plural} (many-to-many)."
         )
         delete_links.type_annotation = many_local
+        _mark_field_deprecated(delete_links, deprecated_reason)
         setattr(mutation_cls, f"delete{local_singular}{target_plural}", delete_links)
         _set_resolver_arguments(
             delete_links, [StrawberryArgument("inputs", None, StrawberryAnnotation(list[link_input]))]

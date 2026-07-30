@@ -147,6 +147,49 @@ def test_exclude_invalid_action_raises():
         SmartComment.from_object(table)
 
 
+# --- deprecated directive ----------------------------------------------------
+
+
+def test_deprecated_absent_is_none():
+    table = _make_table(comment="---\nprimary_key: id\n---\n")
+    assert SmartComment.from_object(table).deprecated is None
+    assert SmartComment.from_object(_make_table(None)).deprecated is None
+
+
+def test_deprecated_reason_string_is_captured():
+    table = _make_table(comment="---\ndeprecated: use widgets_v2 instead\n---\nThe table.\n")
+    result = SmartComment.from_object(table)
+    assert result.deprecated == "use widgets_v2 instead"
+    assert result.content == "The table.\n"
+
+
+def test_deprecated_blank_raises():
+    table = _make_table(comment="---\ndeprecated: '   '\n---\n")
+    with pytest.raises(ValidationError):
+        SmartComment.from_object(table)
+
+
+def test_deprecated_non_string_raises():
+    table = _make_table(comment="---\ndeprecated: true\n---\n")
+    with pytest.raises(ValidationError):
+        SmartComment.from_object(table)
+
+
+def test_pydantic_field_marks_deprecated_column_in_schema():
+    metadata = MetaData()
+    table = Table(
+        "widgets",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("legacy", String, nullable=True, comment="---\ndeprecated: use modern\n---\n"),
+        Column("modern", String, nullable=True),
+    )
+    _, legacy_field = pydantic_field_from_column(table.c.legacy, "model")
+    _, modern_field = pydantic_field_from_column(table.c.modern, "model")
+    assert legacy_field.json_schema_extra == {"deprecated": True}
+    assert modern_field.json_schema_extra is None
+
+
 # --- _assign_view_primary_keys ----------------------------------------------
 
 

@@ -157,6 +157,11 @@ def create_controller(orm_class: DeclarativeMeta, is_view: bool = False) -> lite
     table_name = table.name
     pkeys = table.primary_key.columns.keys()
     comment = SmartComment.from_object(table)
+    # A table ``deprecated`` smart comment marks every generated endpoint
+    # ``deprecated: true`` in OpenAPI; the reason text is appended to each
+    # handler description (OpenAPI has no per-operation deprecation-reason field).
+    is_deprecated = comment.deprecated is not None
+    deprecated_note = f"\n\n**Deprecated:** {comment.deprecated}" if comment.deprecated else ""
     response_model = create_response_model(table)
     get_input_model = create_get_input_model(table)
     create_input_model = create_create_input_model(table)
@@ -181,8 +186,10 @@ def create_controller(orm_class: DeclarativeMeta, is_view: bool = False) -> lite
 
         @litestar.get(
             summary=f"List {table_name}",
-            description=f"List {table_name}, filtering on any field using advanced filters, pagination and ordering",
+            description=f"List {table_name}, filtering on any field using advanced filters, pagination and ordering"
+            + deprecated_note,
             security=[{"BearerToken": []}],
+            deprecated=is_deprecated,
         )
         async def list_items(
             self,
@@ -249,8 +256,9 @@ def create_controller(orm_class: DeclarativeMeta, is_view: bool = False) -> lite
             path=f"/{'/'.join([f'{{{pk}:uuid}}' for pk in pkeys])}",
             raises=[NotFoundException],
             summary=f"Get a {inflect.singular_noun(table_name)}",
-            description=f"Get a {inflect.singular_noun(table_name)} by its primary key(s)",
+            description=f"Get a {inflect.singular_noun(table_name)} by its primary key(s)" + deprecated_note,
             security=[{"BearerToken": []}],
+            deprecated=is_deprecated,
         )
         async def get_item(
             self,
@@ -281,8 +289,9 @@ def create_controller(orm_class: DeclarativeMeta, is_view: bool = False) -> lite
 
         @litestar.post(
             summary=f"Create a new {inflect.singular_noun(table_name)}",
-            description=f"Create a new {inflect.singular_noun(table_name)}",
+            description=f"Create a new {inflect.singular_noun(table_name)}" + deprecated_note,
             security=[{"BearerToken": []}],
+            deprecated=is_deprecated,
         )
         async def create_item(
             self,
@@ -315,8 +324,9 @@ def create_controller(orm_class: DeclarativeMeta, is_view: bool = False) -> lite
             path=f"/{'/'.join([f'{{{pk}:uuid}}' for pk in pkeys])}",
             raises=[NotFoundException],
             summary=f"Update a {inflect.singular_noun(table_name)}",
-            description=f"Update a {inflect.singular_noun(table_name)} by its primary key(s)",
+            description=f"Update a {inflect.singular_noun(table_name)} by its primary key(s)" + deprecated_note,
             security=[{"BearerToken": []}],
+            deprecated=is_deprecated,
         )
         async def update_item(
             self,
@@ -359,8 +369,9 @@ def create_controller(orm_class: DeclarativeMeta, is_view: bool = False) -> lite
             path=f"/{'/'.join([f'{{{pk}:uuid}}' for pk in pkeys])}",
             raises=[NotFoundException],
             summary=f"Delete a {inflect.singular_noun(table_name)}",
-            description=f"Delete a {inflect.singular_noun(table_name)} by its primary key(s)",
+            description=f"Delete a {inflect.singular_noun(table_name)} by its primary key(s)" + deprecated_note,
             security=[{"BearerToken": []}],
+            deprecated=is_deprecated,
         )
         async def delete_item(
             self,
@@ -602,6 +613,9 @@ def create_function_controller(
         A dynamically constructed :class:`litestar.Controller` subclass.
     """
     description = fn.description or f"Custom query exposing {fn.schema}.{fn.name}()."
+    fn_deprecated = fn.metadata.deprecated if fn.metadata else None
+    if fn_deprecated:
+        description = f"{description}\n\n**Deprecated:** {fn_deprecated}"
 
     if fn.return_kind == FunctionReturnKind.SCALAR:
         response_model: type[BaseModel] = _scalar_response_model(fn)
@@ -632,6 +646,7 @@ def create_function_controller(
             summary=f"Call {fn_for_handler.name}",
             description=description,
             security=[{"BearerToken": []}],
+            deprecated=fn_deprecated is not None,
         )
         async def call(  # type: ignore[no-redef]
             self,

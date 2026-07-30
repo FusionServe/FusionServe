@@ -127,7 +127,14 @@ def pydantic_field_from_column(
             default = ...  # required
     else:
         raise ValueError(f"Unknown model_type {model_type!r}")
-    return (field_type, Field(default, description=column.comment))
+    # A column ``deprecated`` smart comment surfaces as OpenAPI ``deprecated: true``.
+    # ``json_schema_extra`` (rather than ``Field(deprecated=…)``) marks the schema
+    # without triggering Pydantic's runtime ``DeprecationWarning`` on every
+    # attribute access during response serialization. The reason text is carried
+    # in the description (the raw smart comment).
+    reason = SmartComment.from_object(column).deprecated
+    json_schema_extra = {"deprecated": True} if reason else None
+    return (field_type, Field(default, description=column.comment, json_schema_extra=json_schema_extra))
 
 
 def _fk_constraints_to(local_table, referred_table) -> list[ForeignKeyConstraint]:

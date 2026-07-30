@@ -224,12 +224,17 @@ class SmartCommentMetadata(BaseModel):
             surface; a bare action string (``exclude: create``) or a list
             (``exclude: [create, delete]``) removes just those actions. Defaults
             to an empty set (nothing excluded).
+        deprecated: Deprecation reason. When set, the object (table, column or
+            function) is marked deprecated on both surfaces — a ``@deprecated``
+            schema directive in GraphQL and ``deprecated: true`` in OpenAPI —
+            with this text carried as the reason. ``None`` when not deprecated.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     primary_key: list[str] | None = None
     exclude: frozenset[CrudAction] = frozenset()
+    deprecated: str | None = None
 
     @field_validator("primary_key", mode="before")
     @classmethod
@@ -289,6 +294,30 @@ class SmartCommentMetadata(BaseModel):
             raise ValueError("exclude must be a boolean, an action string, or a list of action strings")
         return frozenset(items)
 
+    @field_validator("deprecated", mode="before")
+    @classmethod
+    def _coerce_deprecated(cls, value: Any) -> Any:
+        """Normalize the ``deprecated`` directive to a non-empty reason string.
+
+        A deprecation always carries a reason (the GraphQL ``@deprecated``
+        directive's ``reason`` argument and the OpenAPI description note), so a
+        bare/blank value is rejected as an authoring error.
+
+        Args:
+            value: The raw ``deprecated`` value from the parsed frontmatter.
+
+        Returns:
+            ``None`` when unset, or the stripped reason string.
+
+        Raises:
+            ValueError: If present but not a non-empty string.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("deprecated must be a non-empty string giving the deprecation reason")
+        return value.strip()
+
 
 class SmartComment(BaseModel):
     """Parsed table / column / function comment, optionally with YAML frontmatter.
@@ -309,6 +338,15 @@ class SmartComment(BaseModel):
         guard around :attr:`SmartCommentMetadata.exclude`.
         """
         return self.metadata.exclude if self.metadata else frozenset()
+
+    @property
+    def deprecated(self) -> str | None:
+        """Return the deprecation reason, or ``None`` when not deprecated.
+
+        Convenience accessor so callers don't repeat the ``metadata is None``
+        guard around :attr:`SmartCommentMetadata.deprecated`.
+        """
+        return self.metadata.deprecated if self.metadata else None
 
     @classmethod
     def from_text(cls, comment: str | None) -> SmartComment:
