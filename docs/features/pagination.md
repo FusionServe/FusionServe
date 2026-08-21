@@ -10,7 +10,7 @@ Every `GET` list endpoint in FusionServe supports **limit/offset pagination** vi
 
 | Parameter | Type | Default | Constraints | Description |
 |---|---|---|---|---|
-| `_limit` | `integer` | `20` | `>= 1` | Maximum number of records to return |
+| `_limit` | `integer` | `50` | `>= 1` | Maximum number of records to return (default from `default_page_size`) |
 | `_offset` | `integer` | `0` | `>= 0` | Number of records to skip before returning results |
 
 The leading underscore prefix is intentional — it prevents collisions with column names used for [basic equality filtering](filtering.md).
@@ -18,7 +18,7 @@ The leading underscore prefix is intentional — it prevents collisions with col
 ### Example
 
 ```
-GET /api/users?_limit=10&_offset=20
+GET /api/v1/users?_limit=10&_offset=20
 ```
 
 Returns records 21–30 (zero-indexed).
@@ -37,17 +37,18 @@ The server-side maximum is controlled by the `max_page_size` configuration setti
 
 ## How It Works
 
-Pagination is implemented as a **Litestar dependency** using `advanced-alchemy`'s `LimitOffset` filter.  The dependency is created by [`create_filter_dependencies()`](../../src/fusionserve/di.py) and injected into each list handler:
+Pagination is implemented as a **Litestar dependency** using `advanced-alchemy`'s `LimitOffset` filter.  The dependency is created by `create_filter_dependencies()` (re-exported from `advanced_alchemy` via [`fusionserve.di`](../../src/fusionserve/di.py)) on each generated controller, seeded with the configured default page size:
 
 ```python
-def provide_limit_offset_pagination(
-    offset: int = Parameter(ge=0,  query="_offset", default=0,   required=False),
-    limit:  int = Parameter(ge=1,  query="_limit",  default=20,  required=False),
-) -> LimitOffset:
-    return LimitOffset(limit, offset)
+dependencies = create_filter_dependencies(
+    {
+        "pagination_type": "limit_offset",
+        "pagination_size": settings.default_page_size,  # default 50
+    }
+)
 ```
 
-The resulting `LimitOffset` filter is appended to the SQLAlchemy `SELECT` statement before execution:
+The resulting `LimitOffset` filter is appended to the SQLAlchemy `SELECT` statement before execution (a `_limit` above `max_page_size` is rejected with `400 Bad Request`):
 
 ```python
 statement = filters[0].append_to_statement(select(orm_class), orm_class)
@@ -60,7 +61,7 @@ statement = filters[0].append_to_statement(select(orm_class), orm_class)
 Pagination and filtering are applied together.  The `_limit` / `_offset` parameters restrict the **filtered** result set:
 
 ```
-GET /api/orders?status=pending&_limit=5&_offset=0
+GET /api/v1/orders?status=pending&_limit=5&_offset=0
 ```
 
 Returns the first 5 pending orders.

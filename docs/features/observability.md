@@ -21,7 +21,7 @@ Example output:
 ```
 # HELP http_requests_total Total HTTP requests
 # TYPE http_requests_total counter
-http_requests_total{method="GET",path="/api/users",status="200",metrics="get"} 42.0
+http_requests_total{method="GET",path="/api/v1/users",status="200",metrics="get"} 42.0
 ...
 ```
 
@@ -48,7 +48,7 @@ app = Litestar(
 
 | Option | Value | Description |
 |---|---|---|
-| `group_path` | `True` | Collapses parameterised path segments (e.g. `/api/users/{id}`) into a single metric label, preventing cardinality explosion |
+| `group_path` | `True` | Collapses parameterised path segments (e.g. `/api/v1/users/{id}`) into a single metric label, preventing cardinality explosion |
 | `labels` | `{"metrics": "get"}` | Static labels added to every metric |
 
 ---
@@ -85,5 +85,5 @@ With `group_path=True`, path parameters are replaced by their template placehold
 
 | Actual path | Metric label |
 |---|---|
-| `/api/users/abc-123` | `/api/users/{id}` |
-| `/api/invoices/xyz-456` | `/api/invoices/{id}` |
+| `/api/v1/users/abc-123` | `/api/v1/users/{id}` |
+| `/api/v1/invoices/xyz-456` | `/api/v1/invoices/{id}` |

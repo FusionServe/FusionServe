@@ -2,7 +2,7 @@
 
 ## Overview
 
-In addition to the REST API, FusionServe generates a **GraphQL schema** from the same introspected database metadata, exposing every table as a queryable type with relay-style pagination, native filtering/ordering, relationship traversal, and full CRUD mutations. The endpoint is served at `/graphql` via [Strawberry](https://strawberry.rocks/) and [strawberry-orm](https://pypi.org/project/strawberry-orm/) (SQLAlchemy backend).
+In addition to the REST API, FusionServe generates a **GraphQL schema** from the same introspected database metadata, exposing every table as a queryable type with relay-style pagination, native filtering/ordering, relationship traversal, and full CRUD mutations. The endpoint is served at `/api/graphql` via [Strawberry](https://strawberry.rocks/) and [strawberry-orm](https://pypi.org/project/strawberry-orm/) (SQLAlchemy backend).
 
 > **Note:** The GraphQL builder is wired up at startup alongside the REST API. It is built dynamically from live PostgreSQL introspection — there is no codegen step.
 
@@ -12,7 +12,7 @@ In addition to the REST API, FusionServe generates a **GraphQL schema** from the
 
 | Path | Description |
 |---|---|
-| `/graphql` | GraphiQL (interactive browser IDE) and the POST endpoint |
+| `/api/graphql` | GraphiQL (interactive browser IDE) and the POST endpoint |
 
 Queries via `GET` are disabled; only `POST` requests are accepted.
 

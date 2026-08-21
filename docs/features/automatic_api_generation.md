@@ -40,18 +40,19 @@ Base.prepare()   # creates Base.classes.<table_name> for each table
 
 ### 3. Pydantic Model Generation
 
-For each reflected table, FusionServe generates **four purpose-specific Pydantic models** using [`create_model()`](../../src/fusionserve/persistence.py):
+For each reflected table, FusionServe generates **three purpose-specific Pydantic models** on the fly in [`rest.py`](../../src/fusionserve/rest.py) via `create_model()` (there is no shared registry — each controller derives its models directly from its ORM class's `__table__`):
 
-| Model variant | Purpose | PK fields | Nullable handling |
+| Model variant | Builder | Purpose | Field handling |
 |---|---|---|---|
-| `model` | Full read / write representation | included | mirrors DB nullability |
-| `get_input` | Query-string equality filter | included | all fields optional |
-| `create_input` | POST request body | excluded | non-PK fields optional |
-| `pk_input` | Primary-key path parameters | PK only | required |
+| `model` | `create_response_model` | Read responses (GET/POST/PATCH result) | one field per column, mirrors DB nullability |
+| `get_input` | `create_get_input_model` | Query-string equality filters | one optional field per column |
+| `create_input` | `create_create_input_model` | POST request body | columns with a server- or Python-side default become optional; non-nullable columns without a default stay required |
+
+Primary-key path parameters are not a Pydantic model: the path template is built from the table's PK columns directly (typed as `:uuid` segments).
 
 Column types are resolved via SQLAlchemy's `column.type.python_type`; unsupported types fall back to `str`.  Column comments are forwarded as Pydantic `Field(description=...)` so they surface in the OpenAPI schema.
 
-The generated model names follow PascalCase:  a table `invoices` produces `InvoiceModel`, `InvoiceGetInput`, `InvoiceCreateInput`, `InvoicePkInput`.
+The generated model names follow PascalCase:  a table `invoices` produces `InvoiceModel`, `InvoiceGetInput`, and `InvoiceCreateInput`.
 
 ---
 
@@ -75,17 +76,9 @@ FusionServe **requires all table names to be plural** (e.g. `users`, `invoices`,
 
 ---
 
-## Models Registry
+## No shared registry
 
-The output of introspection is a **models registry** — a dictionary mapping each table name to a [`RegistryItem`](../../src/fusionserve/models.py) that holds the four Pydantic model variants.  This registry is passed to both the REST and GraphQL builders, making it the single source of truth for all generated APIs.
-
-```python
-models_registry: dict[str, RegistryItem] = {
-    "users":    RegistryItem(model=..., get_input=..., create_input=..., pk_input=...),
-    "invoices": RegistryItem(...),
-    ...
-}
-```
+The output of introspection is an [`Introspection`](../../src/fusionserve/models.py) object carrying the automap `Base`, the set of view names, and discovered PG functions. There is **no** intermediate model registry: the REST and GraphQL builders each iterate `Base.classes` and derive every Pydantic / Strawberry type they need from each ORM class's `__table__` at build time. The live PostgreSQL schema is the single source of truth.
 
 ---
 
@@ -93,10 +86,12 @@ models_registry: dict[str, RegistryItem] = {
 
 ```
 uvicorn start
-  └─ lifespan()                      # asynccontextmanager
-       ├─ introspect()               # reflect + automap + generate models
-       ├─ rest.build_controllers()   # create Litestar controllers
-       └─ app.register(controller)   # mount routes dynamically
+  └─ lifespan()                             # asynccontextmanager
+       ├─ introspect()                      # reflect + automap -> Introspection
+       ├─ rest.build(introspection)         # per-table CRUD controllers
+       ├─ rest.build_function_controllers() # PG-function controllers
+       ├─ graphql.build(introspection)      # GraphQL controller
+       └─ app.register(...)                 # mount routes dynamically
 ```
 
 Everything happens inside the [Litestar `lifespan`](../../src/fusionserve/main.py) context manager, so the database is only queried once and all generated routes are available before the first HTTP request is served.

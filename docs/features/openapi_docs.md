@@ -10,21 +10,19 @@ FusionServe automatically generates a fully typed **OpenAPI 3.x specification** 
 
 | Path | Description |
 |---|---|
-| `/api/docs` | Interactive API documentation (Swagger UI — default) |
-| `/api/docs/scalar` | Scalar API documentation UI |
+| `/api/swagger` | Swagger UI |
+| `/api/scalar` | Scalar API documentation UI |
 | `/api/openapi.json` | Raw OpenAPI JSON specification |
+
+> The `/api/` root itself issues a 302 redirect to the React SPA (via
+> `RedirectRenderPlugin`); the interactive viewers live at the sub-paths
+> above.
 
 ---
 
 ## Swagger UI
 
-[Swagger UI](https://swagger.io/tools/swagger-ui/) is the classic OpenAPI browser.  FusionServe enables several display enhancements:
-
-| Option | Value | Effect |
-|---|---|---|
-| `displayRequestDuration` | `true` | Shows the elapsed time for each request made from the UI |
-| `filter` | `true` | Adds a search box to filter endpoints by path or tag |
-| `showExtensions` | `true` | Displays OpenAPI vendor extensions (e.g. custom metadata) |
+[Swagger UI](https://swagger.io/tools/swagger-ui/) is the classic OpenAPI browser.  FusionServe registers it via `SwaggerRenderPlugin()` with default options and serves it at `/api/swagger`.
 
 ---
 
@@ -71,16 +69,25 @@ The OpenAPI configuration is set up in [`main.py`](../../src/fusionserve/main.py
 openapi_config=OpenAPIConfig(
     title=settings.app_name,
     version="1.0.0",
-    path="/api/docs",
-    root_schema_site="swagger",
+    path=settings.base_path,  # "/api"
     render_plugins=[
-        SwaggerRenderPlugin(),
-        ScalarRenderPlugin(...),
-    ],
+        ui.RedirectRenderPlugin(),   # "/api" -> SPA (default plugin)
+        SwaggerRenderPlugin(),       # "/api/swagger"
+        ScalarRenderPlugin(
+            options={
+                "theme": "elysiajs",
+                "defaultOpenFirstTag": False,
+                "darkMode": True,
+            }
+        ),                           # "/api/scalar"
+    ]
+    if settings.ui_enabled
+    else [JsonRenderPlugin()],       # UI disabled: only serve openapi.json
+    components=Components(...),      # BearerToken security scheme
 )
 ```
 
-`root_schema_site="swagger"` makes Swagger UI the default when navigating to `/api/docs`; Scalar is available at the `/api/docs/scalar` sub-path.
+The OpenAPI router mounts each render plugin at a sub-path under `path` (`/api`), so Swagger lands at `/api/swagger` and Scalar at `/api/scalar`; the raw document is always available at `/api/openapi.json`. When `ui_enabled` is `False`, the interactive viewers and the SPA redirect are dropped and only the JSON document is served.
 
 ---
 

@@ -5,7 +5,7 @@
 In addition to the CRUD endpoints synthesised from each table, FusionServe can expose **PostgreSQL functions** as first-class queries on both the GraphQL and REST surfaces. Define a `STABLE` (or `IMMUTABLE`) function in your application schema, give it a comment, and it appears at startup as:
 
 - a root field on the GraphQL `Query` type, and
-- a `GET` endpoint under `/api/<function_name>`.
+- a `GET` endpoint under `/api/v1/<function_name>`.
 
 This is the FusionServe equivalent of [PostgREST RPC](https://postgrest.org/en/stable/api.html#stored-procedures) / [Postgraphile custom queries](https://www.graphile.org/postgraphile/custom-queries/) — the database remains the source of truth, and complex read-side logic stays close to the data.
 
@@ -68,7 +68,7 @@ The table referenced by `RETURNS [SETOF] <table>` must already be reflected by a
 `my_function_name(...)` becomes:
 
 - `myFunctionName` on GraphQL (camelCase, via `strawberry.utils.str_converters.to_camel_case`).
-- `/api/my_function_name` on REST (snake_case, matching PostgreSQL).
+- `/api/v1/my_function_name` on REST (snake_case, matching PostgreSQL).
 
 If the GraphQL field name collides with an existing query field (table list / by-PK), or the REST path collides with an existing table route, the function is **skipped with a logged warning** — the table-driven route always wins. A `# TODO` next to the skip points marks this as the spot for a future opt-in collision-resolution strategy (e.g. namespace prefix, smart-comment-driven override).
 
@@ -145,7 +145,7 @@ The `maxResults` argument is **optional** because the PostgreSQL function declar
 ### REST
 
 ```
-GET /api/users_search?query=ada&max_results=10
+GET /api/v1/users_search?query=ada&max_results=10
 ```
 
 ```json
@@ -164,7 +164,7 @@ AS $$ SELECT 'Hello, ' || name $$;
 ```
 
 ```
-GET /api/greeting?name=Ada
+GET /api/v1/greeting?name=Ada
 ```
 
 ```json

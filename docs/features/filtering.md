@@ -11,7 +11,7 @@ FusionServe supports two complementary filtering mechanisms on every `GET` list 
 Any column name can be used as a query parameter to filter records by exact equality.
 
 ```
-GET /api/users?role=admin&status=active
+GET /api/v1/users?role=admin&status=active
 ```
 
 Internally, each provided parameter is added as a `WHERE` clause on the SQLAlchemy `select` statement:
@@ -35,8 +35,8 @@ for k in condition.model_fields:
 For multi-field expressions and inequality comparisons, the `_filter` query parameter accepts an **OData v4 filter expression** (with a leading underscore to avoid clashing with column names).
 
 ```
-GET /api/users?_filter=(status eq 'active') and (age gt 18)
-GET /api/orders?_filter=(total ge 100.00) and (region ne 'EU')
+GET /api/v1/users?_filter=(status eq 'active') and (age gt 18)
+GET /api/v1/orders?_filter=(total ge 100.00) and (region ne 'EU')
 ```
 
 OData filter expressions are translated to native SQLAlchemy WHERE clauses via the [`odata-query`](https://pypi.org/project/odata-query/) library.
@@ -78,7 +78,7 @@ The filter value is validated by the [`AdvancedFilter`](../../src/fusionserve/mo
 Basic equality filters and OData filters are applied **in sequence** and are cumulative (`AND` semantics):
 
 ```
-GET /api/products?category=electronics&_filter=(price lt 500) and (in_stock eq true)
+GET /api/v1/products?category=electronics&_filter=(price lt 500) and (in_stock eq true)
 ```
 
 This returns products where:
