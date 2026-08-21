@@ -610,6 +610,11 @@ def build(introspection: Introspection):
         mutation=strawberry.type(Mutation) if has_mutations else None,
         extensions=[QueryDepthLimiter(max_depth=_MAX_WHERE_DEPTH)],
     )
+    if settings.echo_sdl:
+        from strawberry.printer import print_schema
+
+        _logger.info("GraphQL SDL:\n%s", print_schema(schema))
+
     return make_graphql_controller(
         schema,
         path=f"{settings.base_path}/graphql",

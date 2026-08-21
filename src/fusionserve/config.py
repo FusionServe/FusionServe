@@ -52,17 +52,22 @@ class Settings(BaseSettings):
     )
     app_name: str = "FusionServe"
     log_level: str = "INFO"
+    #: whether to enable the Litestar debug messages in responses.
+    debug: bool = False
+    #: Whether to log SQL statements executed by SQLAlchemy.
+    echo_sql: bool = False
+    #: Whether to print the SDL of the GraphQL schema at startup.
+    echo_sdl: bool = False
     pg_user: str = "fusionserve"
     pg_password: SecretStr = SecretStr("")
     pg_host: str = "localhost"
     pg_database: str = "fusionserve"
     pg_app_schema: str = "app_public"
     pg_port: int = 5432
-    echo_sql: bool = False
     default_page_size: int = 50
     max_page_size: int = 1000
     anonymous_role: str = "fusionserve"
-    debug: bool = False
+
     base_path: str = "/api"
 
     ui_enabled: bool = True

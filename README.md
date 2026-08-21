@@ -86,13 +86,37 @@ real `.env` — the repository's `.gitignore` excludes it.**
 | `pg_database` | `fusionserve` | PostgreSQL database name. |
 | `pg_app_schema` | `app_public` | Schema to introspect. |
 | `echo_sql` | `False` | Log SQL queries via SQLAlchemy `echo`. |
+| `echo_sdl` | `False` | Print the GraphQL schema SDL to stdout at startup. |
+| `default_page_size` | `50` | Default page size when the client omits `_limit`. |
 | `max_page_size` | `1000` | Hard upper bound on a page size. |
 | `anonymous_role` | `fusionserve` | PostgreSQL role assumed for unauthenticated requests. |
 | `jwt_issuer` | _(unset)_ | OIDC issuer URL; used for `iss` validation and JWKS discovery. |
 | `jwks_url` | _(unset)_ | Optional explicit JWKS endpoint (skips OIDC discovery). |
 | `client_id` | `app_name.lower()` | OAuth2 client id used to locate roles in the access token. |
+| `claims_map` | _(derived)_ | JSON-Pointer map of JWT claims → `User` fields; `roles`/`role` default to `/resource_access/<client_id>/roles`. See `docs/features/security.md`. |
 | `ui_enabled` | `True` | When `False`, disables the integrated UI and the OpenAPI render plugins. |
 | `ui_path` | `f"{base_path}/-/"` (i.e. `/api/-/`) | Public URL where the React SPA is mounted. `/api/` issues a 302 redirect here. Derives from `base_path` when unset; override with `UI_PATH=…`. |
+
+#### Storage / file uploads
+
+The file-upload feature is opt-in (see
+[`docs/features/file_uploads.md`](docs/features/file_uploads.md) for the
+full reference, including the required `uploads` metadata table). Nested
+S3 settings map to `STORAGE_S3__<FIELD>` environment variables (`__` is
+the nesting delimiter).
+
+| Setting | Default | Description |
+|---|---|---|
+| `storage_backend` | `s3` | Backend selector: `s3`, `azure` (unimplemented placeholder), or a `pkg.mod:Class` dotted import path. |
+| `storage_metadata_table` | `uploads` | Metadata table (in `pg_app_schema`) gating the feature; when absent the upload routes are not registered. |
+| `storage_max_single_file_bytes` | `104857600` (100 MiB) | Per-file upload size cap, enforced at the `complete` step. |
+| `storage_proxy_urls` | `False` | Route presigned upload/download URLs through FusionServe's own HTTP proxy instead of the object store. |
+| `storage_s3.bucket` (`STORAGE_S3__BUCKET`) | _(empty)_ | Target S3 bucket. Required when `storage_backend="s3"`. |
+| `storage_s3.region` (`STORAGE_S3__REGION`) | _(unset)_ | AWS region of the bucket. |
+| `storage_s3.endpoint_url` (`STORAGE_S3__ENDPOINT_URL`) | _(unset)_ | Custom endpoint for S3-compatible backends (MinIO, LocalStack). |
+| `storage_s3.access_key_id` (`STORAGE_S3__ACCESS_KEY_ID`) | _(unset)_ | AWS access key; falls back to the standard credential chain when unset. |
+| `storage_s3.secret_access_key` (`STORAGE_S3__SECRET_ACCESS_KEY`) | _(unset)_ | AWS secret key. |
+| `storage_s3.presign_ttl_seconds` (`STORAGE_S3__PRESIGN_TTL_SECONDS`) | `3600` | Lifetime (seconds) of presigned upload/download URLs. |
 
 ### Required PostgreSQL privileges
 
