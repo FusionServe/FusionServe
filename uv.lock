@@ -655,7 +655,7 @@ requires-dist = [
     { name = "strawberry-graphql" },
     { name = "strawberry-orm", extras = ["sqlalchemy"] },
     { name = "typing-extensions" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.48.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.49.0" },
 ]
 
 [package.metadata.requires-dev]
