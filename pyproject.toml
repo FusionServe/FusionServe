@@ -28,7 +28,7 @@ dependencies = [
     # Both granian and uvicorn are supported runtime servers.
     # Dockerfile and CI default to uvicorn; granian is offered as an
     # optional faster runner for production deployments.
-    "granian[dotenv,pname,reload,rloop,uvloop]>=2.7.4",
+    "granian[dotenv,pname,reload,rloop,uvloop]>=2.7.6",
     "httpx",
     "importlib-metadata",
     "inflect",
