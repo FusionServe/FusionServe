@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     pg_database: str = "fusionserve"
     pg_app_schema: str = "app_public"
     pg_port: int = 5432
+    pg_pool_size: int = 50
+    pg_pool_timeout: int = 30
     default_page_size: int = 50
     max_page_size: int = 1000
     anonymous_role: str = "fusionserve"

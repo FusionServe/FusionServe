@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The async engine now receives the pool checkout timeout as
+  ``pool_timeout=`` instead of ``timeout=``. SQLAlchemy rejects the latter,
+  so importing ``fusionserve.persistence`` raised
+  ``TypeError: Invalid argument(s) 'timeout' sent to create_engine()``.
 - `persistence.introspect()` now builds the
   ``CREATE OR REPLACE FUNCTION <schema>.current_user_id()`` DDL inside the
   function body via the new ``_current_user_id_ddl`` helper, instead of at
@@ -38,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `settings.pg_pool_size` (default 50) and `settings.pg_pool_timeout`
+  (default 30) — expose the async engine's connection-pool size and
+  checkout timeout. Peak connections per process are
+  ``pg_pool_size`` + SQLAlchemy's default ``max_overflow`` of 10;
+  ``pg_pool_timeout`` bounds only the wait for a free pooled connection,
+  not connection establishment or query execution.
 - `models.RecordNotFoundError` — typed exception raised by the GraphQL `pk`,
   `update`, and `delete` resolvers in place of bare `raise Exception("not found")`.
 - `settings.default_page_size` (default 50) — REST and GraphQL list endpoints

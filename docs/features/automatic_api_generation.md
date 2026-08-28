@@ -72,6 +72,8 @@ FusionServe **requires all table names to be plural** (e.g. `users`, `invoices`,
 | `pg_password` | — | Database password |
 | `pg_database` | `fusionserve` | Database name |
 | `pg_app_schema` | `app_public` | Schema to introspect |
+| `pg_pool_size` | `50` | Persistent connections in the async engine's pool (plus SQLAlchemy's default `max_overflow` of 10) |
+| `pg_pool_timeout` | `30` | Seconds to wait for a free pooled connection before raising `TimeoutError` |
 | `echo_sql` | `false` | Log generated SQL to stdout |
 
 ---

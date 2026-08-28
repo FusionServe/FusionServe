@@ -85,6 +85,8 @@ real `.env` — the repository's `.gitignore` excludes it.**
 | `pg_password` | _(empty)_ | PostgreSQL password. |
 | `pg_database` | `fusionserve` | PostgreSQL database name. |
 | `pg_app_schema` | `app_public` | Schema to introspect. |
+| `pg_pool_size` | `50` | Persistent connections in the async engine's `QueuePool`. SQLAlchemy's default `max_overflow` of 10 sits on top, so peak connections per process are `pg_pool_size + 10`; keep the total across processes under PostgreSQL's `max_connections`. |
+| `pg_pool_timeout` | `30` | Seconds to wait for a free connection when the pool (including overflow) is exhausted, before raising `TimeoutError`. Pool-checkout timeout only — it does not bound connection establishment or query execution. |
 | `echo_sql` | `False` | Log SQL queries via SQLAlchemy `echo`. |
 | `echo_sdl` | `False` | Print the GraphQL schema SDL to stdout at startup. |
 | `default_page_size` | `50` | Default page size when the client omits `_limit`. |
