@@ -34,7 +34,7 @@ Uploads are **two-phase**:
 
 2. client ── PUT bytes ──▶ upload_url (object store, directly)
 
-3. POST /api/v1/_uploads/{id}/complete ── HEAD object, enforce size ──▶
+3. POST /api/v1/_uploads/{id}/complete ── HEAD object ──▶
                                           UPDATE row SET size/etag, status='completed'
 ```
 
@@ -129,9 +129,6 @@ STORAGE_BACKEND=s3
 # absent.
 STORAGE_METADATA_TABLE=uploads
 
-# Per-file cap (bytes), enforced at the /complete step.
-STORAGE_MAX_SINGLE_FILE_BYTES=104857600  # 100 MiB per file
-
 # Route presigned URLs through FusionServe's HTTP proxy (default off).
 STORAGE_PROXY_URLS=false
 
@@ -206,8 +203,9 @@ curl -X POST http://localhost:8001/api/v1/_uploads/8c5b6e54-.../complete \
 ```
 
 `complete` returns the finalized metadata row. It responds `409` if the
-object is not present in the store yet, and `413` (deleting the blob and
-row) if the uploaded object exceeds `STORAGE_MAX_SINGLE_FILE_BYTES`.
+object is not present in the store yet. Upload size is not capped by the
+application — enforce any limit at the object store (e.g. an S3 bucket
+policy).
 
 ### Download
 

@@ -13,8 +13,7 @@ Uploads are **direct-to-store** and two-phase:
 2. the client uploads the bytes straight to the object store using that
    URL (or through the proxy — see below).
 3. ``POST /_uploads/{id}/complete`` — the server HEADs the object,
-   enforces the size cap, records the verified size/etag and flips the
-   row to ``completed``.
+   records the verified size/etag and flips the row to ``completed``.
 
 Downloads issue a 302 to a presigned GET URL. When
 ``settings.storage_proxy_urls`` is on, both the upload and download URLs
@@ -160,7 +159,6 @@ def build_controller(
         registered with the application.
     """
     backend_name = type(storage).__name__
-    max_single_file = settings.storage_max_single_file_bytes
     presign_ttl = settings.storage_s3.presign_ttl_seconds
 
     def _maybe_proxy(url: str, request: Request[Any, Any, Any]) -> str:
@@ -275,10 +273,9 @@ def build_controller(
             path="/{id:uuid}/complete",
             summary="Finalize a previously-initiated upload",
             description=(
-                "Verify the object exists in the backend, enforce the "
-                "per-file size limit, record the verified size/etag and "
-                "mark the row ``completed``. Optionally overwrite the "
-                "``attributes`` JSONB bag."
+                "Verify the object exists in the backend, record the "
+                "verified size/etag and mark the row ``completed``. "
+                "Optionally overwrite the ``attributes`` JSONB bag."
             ),
             security=[{"BearerToken": []}],
             raises=[NotFoundException],
@@ -304,14 +301,6 @@ def build_controller(
                     status_code=409,
                     detail="object has not been uploaded to storage yet",
                 ) from exc
-            if stat.size_bytes > max_single_file:
-                await storage.delete(row.storage_key)
-                await session.delete(row)
-                await session.commit()
-                raise ClientException(
-                    status_code=413,
-                    detail=f"uploaded object exceeds per-file size limit of {max_single_file} bytes",
-                )
             row.size_bytes = stat.size_bytes
             row.etag = stat.etag
             row.status = "completed"
@@ -388,7 +377,10 @@ def build_controller(
             summary="Relay a direct upload to the object store",
             include_in_schema=False,
             opt={"exclude_from_auth": True},
-            request_max_body_size=max_single_file,
+            # Unbounded on purpose: the presigned signature is the capability
+            # and the object store enforces any size policy. ``None`` avoids
+            # inheriting Litestar's default request-body cap.
+            request_max_body_size=None,
         )
         async def proxy_upload(
             self,

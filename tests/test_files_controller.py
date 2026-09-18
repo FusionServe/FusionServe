@@ -256,13 +256,8 @@ def _reset_proxy_setting(monkeypatch):
     monkeypatch.setattr(settings, "storage_proxy_urls", False)
 
 
-def _build_app(*, backend, session, user, max_single_file: int | None = None, with_user: bool = True):
+def _build_app(*, backend, session, user, with_user: bool = True):
     """Build a minimal Litestar app hosting just the files controller."""
-    from fusionserve.config import settings
-
-    if max_single_file is not None:
-        settings.storage_max_single_file_bytes = max_single_file
-
     controller = build_controller(_UPLOADS_TABLE, backend)
 
     async def _session_provider() -> _FakeSession:
@@ -476,16 +471,6 @@ def test_complete_missing_object_returns_409(fake_backend, fake_session, authed_
     with TestClient(app) as client:
         response = client.post(f"/api/v1/_uploads/{row.id}/complete")
     assert response.status_code == 409
-
-
-def test_complete_oversize_object_rejected_and_cleaned(fake_backend, fake_session, authed_user):
-    row = _seed_pending(fake_session, fake_backend, key="k/big.bin", size=999, uploaded=True)
-    app = _build_app(backend=fake_backend, session=fake_session, user=authed_user, max_single_file=100)
-    with TestClient(app) as client:
-        response = client.post(f"/api/v1/_uploads/{row.id}/complete")
-    assert response.status_code == 413
-    assert "k/big.bin" in fake_backend.delete_calls
-    assert row.id not in fake_session.rows
 
 
 def test_complete_missing_row_returns_404(fake_backend, fake_session, authed_user):

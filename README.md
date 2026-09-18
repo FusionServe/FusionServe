@@ -111,7 +111,6 @@ the nesting delimiter).
 |---|---|---|
 | `storage_backend` | `s3` | Backend selector: `s3`, `azure` (unimplemented placeholder), or a `pkg.mod:Class` dotted import path. |
 | `storage_metadata_table` | `uploads` | Metadata table (in `pg_app_schema`) gating the feature; when absent the upload routes are not registered. |
-| `storage_max_single_file_bytes` | `104857600` (100 MiB) | Per-file upload size cap, enforced at the `complete` step. |
 | `storage_proxy_urls` | `False` | Route presigned upload/download URLs through FusionServe's own HTTP proxy instead of the object store. |
 | `storage_s3.bucket` (`STORAGE_S3__BUCKET`) | _(empty)_ | Target S3 bucket. Required when `storage_backend="s3"`. |
 | `storage_s3.region` (`STORAGE_S3__REGION`) | _(unset)_ | AWS region of the bucket. |

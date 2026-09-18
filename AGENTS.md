@@ -167,10 +167,11 @@ process will not come up without the database.
     (init) inserts a `pending` row per file and returns a presigned
     upload URL (`StorageBackend.generate_upload_url`); the client PUTs
     bytes straight to the store; `POST /_uploads/{id}/complete` HEADs
-    the object (`stat`), enforces `STORAGE_MAX_SINGLE_FILE_BYTES`
-    (deleting + 413 on breach), and flips the row to `completed` with
-    the verified size/etag. Bytes never pass through the app in this
-    path — do **not** reintroduce a `save`/`open` streaming Protocol.
+    the object (`stat`) and flips the row to `completed` with the
+    verified size/etag. Upload size is **not** capped by the app —
+    enforce limits at the object store. Bytes never pass through the app
+    in this path — do **not** reintroduce a `save`/`open` streaming
+    Protocol.
   - Download (`GET /_uploads/{id}/content`) always 302-redirects to a
     presigned GET URL. The cascading delete at `DELETE /_uploads/{id}`
     removes the blob then the row; the auto-generated
@@ -188,8 +189,9 @@ process will not come up without the database.
     preserved so the signature stays valid); the `proxy` relay
     handlers reconstruct the target from `StorageBackend.object_origin()`
     (never from client input — anti-SSRF) and stream via `httpx`. The
-    relay routes carry `opt={"exclude_from_auth": True}` and set a
-    per-handler `request_max_body_size` for uploads — the signed URL is
+    relay routes carry `opt={"exclude_from_auth": True}`; the upload
+    relay sets `request_max_body_size=None` (deliberately unbounded, so
+    it doesn't inherit Litestar's default body cap) — the signed URL is
     the capability, like a raw presigned URL.
   - Storage backend selection (`STORAGE_BACKEND`, default `"s3"`)
     accepts `"s3"`, `"azure"` (an unimplemented placeholder whose

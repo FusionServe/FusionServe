@@ -105,10 +105,6 @@ class Settings(BaseSettings):
     #: controller consults. When absent, the files feature is silently
     #: disabled at startup.
     storage_metadata_table: str = "uploads"
-    #: Per-file cap (in bytes). Enforced at the ``complete`` step by
-    #: HEAD-ing the uploaded object; oversize objects are deleted and
-    #: rejected. Also bounds the proxy relay when proxying is enabled.
-    storage_max_single_file_bytes: int = 100 * 1024 * 1024
     #: When true, presigned upload/download URLs handed to clients are
     #: rewritten to point at FusionServe's own HTTP proxy (the ``proxy``
     #: relay in :mod:`fusionserve.files.controller`) instead of the object
