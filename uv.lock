@@ -637,7 +637,7 @@ requires-dist = [
     { name = "aioboto3", specifier = ">=13.0.0" },
     { name = "asyncpg" },
     { name = "brotli", specifier = ">=1.2.0" },
-    { name = "granian", extras = ["dotenv", "pname", "reload", "rloop", "uvloop"], specifier = ">=2.7.4" },
+    { name = "granian", extras = ["dotenv", "pname", "reload", "rloop", "uvloop"], specifier = ">=2.7.6" },
     { name = "httpx" },
     { name = "importlib-metadata" },
     { name = "inflect" },
