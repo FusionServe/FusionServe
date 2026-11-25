@@ -47,7 +47,7 @@ dependencies = [
     "strawberry-orm[sqlalchemy]",
     "typing-extensions",
     "uvicorn[standard]>=0.49.0",
-    "advanced-alchemy==1.11.0",
+    "advanced-alchemy==1.12.0",
 ]
 
 [build-system]
